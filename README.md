@@ -31,7 +31,7 @@ Skyward is a recovery written in Rust, from scratch.
 | Device | Codename | Tested system version |
 | --- | --- | --- |
 | Redmi K70 | `vermeer` | OS4.0.0.13.XNKCNXM.D01 NexusHyper v4.1.2 (Android 17) |
-
+Only after the system test has passed
 
 
 ## Installing
