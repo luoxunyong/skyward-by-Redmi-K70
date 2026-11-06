@@ -32,8 +32,8 @@ Skyward is a recovery written in Rust, from scratch.
 
 | Device | Codename | Tested system version |
 | --- | --- | --- |
-| Xiaomi 17 Ultra | `nezha` | OS4.0.4.0.XPACNXM (Android 17) |
-| Xiaomi 13 Ultra | `ishtar` | OS3.0.308.0.WMACNXM (Android 16) |
+| Redmi K70 | `vermeer` | OS4.0.0.13.XNKCNXM.D01 NexusHyper v4.1.2 (Android 17) |
+
 
 
 ## Installing
