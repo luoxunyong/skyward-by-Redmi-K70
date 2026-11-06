@@ -31,8 +31,8 @@ Skyward 是使用 Rust 编写的 recovery，从零开始编写。
 | 机型 | 代号 | 测试的系统版本 |
 | --- | --- | --- |
 |红米K70 | `vermeer` | OS4.0.0.13.XNKCNXM.D01 NexusHyper v4.1.2（Android 17） |
-| 
 
+仅在该系统测试通过
 
 ## 安装
 
