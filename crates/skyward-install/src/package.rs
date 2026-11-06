@@ -152,22 +152,10 @@ pub fn check(update: &Update, phone: &Phone) -> Result<(), Refusal> {
     if m.get("pre-build").is_some() || m.get("pre-build-incremental").is_some() {
         return Err(Refusal::Incremental);
     }
-    let Some(build) = &phone.installed else { return Ok(()) };
-    // A full package may install the version already there again; going
-    // back needs a package made for the build it leaves, an incremental
-    // one.
-    let timestamp = m.get("post-timestamp").and_then(|t| t.parse().ok()).unwrap_or(0);
-    if timestamp < build.timestamp {
-        return Err(Refusal::Older { package: timestamp, installed: build.timestamp });
-    }
-    // Patch levels are yyyy-mm-dd, so they order as text. Data that is
-    // erased before the older system starts is never read under it.
-    if let Some(patch) = m.get("post-security-patch-level") {
-        let allowed = m.get("spl-downgrade") == Some("yes") || m.get("ota-downgrade") == Some("yes") || update.wipes();
-        if patch < build.security_patch.as_str() && !allowed {
-            return Err(Refusal::OlderPatch { package: patch.to_string(), installed: build.security_patch.clone() });
-        }
-    }
+    // A package older than the installed system installs too, as other
+    // recoveries take it: going back is the user's to ask for, and the
+    // data the older system cannot read is theirs to erase before it
+    // starts.
     Ok(())
 }
 
@@ -248,23 +236,26 @@ METADATA_SIZE=1024
     }
 
     #[test]
-    fn incremental_and_older_packages_are_refused() {
+    fn incremental_packages_are_refused_but_older_full_ones_install() {
         let incremental = format!(
             "{METADATA_TEXT}pre-build=Xiaomi/ishtar/ishtar:16/X/OS3.0.305.0.WMACNXM:user/release-keys\npre-build-incremental=OS3.0.305.0.WMACNXM\n"
         );
-        assert_eq!(check(&update_with(&incremental, PROPERTIES_TEXT), &phone()), Err(Refusal::Incremental));
+        assert_eq!(
+            check(&update_with(&incremental, PROPERTIES_TEXT), &phone()),
+            Err(Refusal::Incremental)
+        );
         let older = METADATA_TEXT.replace("1781000000", "1770000000");
         assert_eq!(
             check(&update_with(&older, PROPERTIES_TEXT), &phone()),
-            Err(Refusal::Older { package: 1_770_000_000, installed: 1_778_243_655 })
+            Ok(()),
+            "an older full package installs, as other recoveries take it"
         );
         let patch = METADATA_TEXT.replace("2026-06-01", "2026-03-01");
         assert_eq!(
             check(&update_with(&patch, PROPERTIES_TEXT), &phone()),
-            Err(Refusal::OlderPatch { package: "2026-03-01".into(), installed: "2026-04-01".into() })
+            Ok(()),
+            "an older security patch installs too; erasing the data it cannot read is the user's to ask for"
         );
-        let allowed = format!("{}spl-downgrade=yes\n", METADATA_TEXT.replace("2026-06-01", "2026-03-01"));
-        assert_eq!(check(&update_with(&allowed, PROPERTIES_TEXT), &phone()), Ok(()));
     }
 
     #[test]

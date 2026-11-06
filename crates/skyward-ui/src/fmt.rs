@@ -789,10 +789,35 @@ pub fn file_size(bytes: u64) -> String {
     format!("{n} {}", UNITS[unit])
 }
 
+/// How fast bytes move, `bytes` of them a second, as the install page tells
+/// it: `86.4 MB`, in steps of 1000.
+pub fn pace(bytes: f64) -> String {
+    const UNITS: [&str; 4] = ["B", "KB", "MB", "GB"];
+    let (mut v, mut unit) = (bytes.max(0.0), 0);
+    while v > 900.0 && unit < UNITS.len() - 1 {
+        v /= 1000.0;
+        unit += 1;
+    }
+    let tenths = (v * 10.0).round() as u64;
+    let n = match tenths % 10 {
+        0 => format!("{v:.0}"),
+        _ => format!("{v:.1}"),
+    };
+    format!("{n} {}", UNITS[unit])
+}
+
 /// A Unix time in the zone at `zone` in [`TIME_ZONES`], to the minute:
 /// `2026年10月19日 02:31`, `October 19, 2026, 02:31`.
 pub fn datetime(l: Lang, unix: i64, zone: usize) -> String {
     let (date, clock) = (date(l, unix, zone), clock(unix, zone));
+    tr!(l, "{date} {clock}", "{date} {clock}", "{date}, {clock}")
+}
+
+/// A Unix time in the zone at `zone` in [`TIME_ZONES`], to the minute, the
+/// clock as the pages show it: on a 24-hour clock, or on a 12-hour one with
+/// AM or PM.
+pub fn datetime_clocked(l: Lang, unix: i64, zone: usize, twenty_four: bool) -> String {
+    let (date, clock) = (date(l, unix, zone), clock_hours(unix, zone, twenty_four));
     tr!(l, "{date} {clock}", "{date} {clock}", "{date}, {clock}")
 }
 
@@ -801,6 +826,20 @@ pub fn datetime(l: Lang, unix: i64, zone: usize) -> String {
 pub fn clock(unix: i64, zone: usize) -> String {
     let t = local(unix, zone);
     format!("{:02}:{:02}", t.hour(), t.minute())
+}
+
+/// The time of day in the zone at `zone` in [`TIME_ZONES`], `HH:MM` on a
+/// 24-hour clock or `H:MM AM`/`PM` on a 12-hour one, as the pages show it
+/// where the phone's own settings say which.
+pub fn clock_hours(unix: i64, zone: usize, twenty_four: bool) -> String {
+    let t = local(unix, zone);
+    if twenty_four {
+        return format!("{:02}:{:02}", t.hour(), t.minute());
+    }
+    let hour = t.hour() % 12;
+    let hour = if hour == 0 { 12 } else { hour };
+    let meridiem = if t.hour() < 12 { "AM" } else { "PM" };
+    format!("{hour}:{:02} {meridiem}", t.minute())
 }
 
 /// A Unix time in the zone at `zone` in [`TIME_ZONES`], to the second, as

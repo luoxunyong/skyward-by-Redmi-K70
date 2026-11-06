@@ -2,7 +2,7 @@ use crate::app::{
     Action, BackupAt, BackupEnd, BackupJob, Check, ClashChoice, Confirm, Damage, Data, Dock, DownloadEnd, EraseStop, Field, FileKind,
     FileOp, FileTask, Fold, Folder, Frame, FsAction, FsChoice, FsRow, Have, HeroArt, Hit, Install, JobEnd, Keys, Pick, Place, Rows, Screen,
     Slider, Source, State, Switch, Target, UsbDrive, UsbLink, Wipe, ADDABLE, BACKUP_PARTS, DATA_ERASED, DATA_PARTITION, DOWNLOADS,
-    FASTBOOT_CHOICES, SCREEN_OFF, TARGETS, TIME_ZONES, USB_DRIVE_UNREADABLE, USB_DRIVE_WANTED, WIPES, installs,
+    FASTBOOT_CHOICES, REFRESH_RATES, SCREEN_OFF, TARGETS, TIME_ZONES, USB_DRIVE_UNREADABLE, USB_DRIVE_WANTED, WIPES, installs,
 };
 use crate::canvas::Canvas;
 use crate::color::Rgba;
@@ -72,6 +72,7 @@ pub fn render(screen: Screen, cx: &Ctx) -> Frame {
         Screen::About => about(cx),
         Screen::Specs => specs(cx),
         Screen::ScreenOff => screen_off(cx),
+        Screen::RefreshRate => refresh_rate(cx),
         Screen::Search => search(cx),
         Screen::Backup => backup(cx),
         Screen::Restore => restore(cx),
@@ -159,6 +160,8 @@ const ABOUT: Text = ["关于本机", "關於手機", "About phone"];
 const SPECS: Text = ["全部参数与信息", "全部規格與資訊", "All specs"];
 const LOGS: Text = ["导出日志", "匯出記錄", "Export logs"];
 const SCREEN_TIMEOUT: Text = ["息屏时间", "螢幕自動關閉", "Screen timeout"];
+const REFRESH_RATE: Text = ["刷新率", "螢幕更新率", "Refresh rate"];
+const HOUR_FORMAT: Text = ["24 小时制", "24 小時制", "24-hour clock"];
 const UPDATE: Text = ["系统更新", "系統更新", "System update"];
 const FILES: Text = ["文件管理", "檔案管理", "File manager"];
 const TERMINAL: Text = ["终端", "終端機", "Terminal"];
@@ -319,7 +322,11 @@ pub fn settings(cx: &Ctx) -> Frame {
     if let Some(r) = slider.below {
         out.push(Hit { rect: r, action: Action::Open(Screen::ScreenOff) });
     }
-    y = widgets::section(&mut c, t, f, slider.bottom, l.pick(["振动", "震動", "Vibration"]));
+    // The panel's own rate, right under the time the screen stays on.
+    let rate = refresh_rate_name(l, REFRESH_RATES[s.refresh_rate]);
+    let rates = widgets::list(&mut c, t, f, slider.bottom, &[Row::new(l.pick(REFRESH_RATE)).trail(Trail::Value(&rate))]);
+    out.extend(hits(&rates.rows, &[Action::Open(Screen::RefreshRate)]));
+    y = widgets::section(&mut c, t, f, rates.bottom, l.pick(["振动", "震動", "Vibration"]));
     let below = Row::new(l.pick(["触摸振动", "觸控震動", "Touch vibration"])).trail(Trail::Switch(s.vibrate));
     let vibration = widgets::slider_card(&mut c, t, f, y, Caption::Vibrate, l.pick(["振动强度", "震動強度", "Vibration intensity"]), s.vibration, Some(below));
     out.push(Hit { rect: vibration.track, action: Action::Slider(Slider::Vibration) });
@@ -330,8 +337,11 @@ pub fn settings(cx: &Ctx) -> Frame {
     let general = widgets::list(&mut c, t, f, y, &[
         Row::new(l.pick(LANGUAGE)).icon(BLUE, Icon::Globe).trail(Trail::Value(l.name())),
         Row::new(l.pick(TIME_ZONE)).icon(ORANGE, Icon::Clock).trail(Trail::Value(l.pick(TIME_ZONES[s.time_zone].0))),
+        // Right under the time zone: the clock's own form, as the phone's
+        // settings say which.
+        Row::new(l.pick(HOUR_FORMAT)).icon(ORANGE, Icon::Clock).trail(Trail::Switch(s.hour24)),
     ]);
-    out.extend(hits(&general.rows, &[Action::Open(Screen::Language), Action::Open(Screen::TimeZone)]));
+    out.extend(hits(&general.rows, &[Action::Open(Screen::Language), Action::Open(Screen::TimeZone), Action::Hour24(!s.hour24)]));
     y = widgets::section(&mut c, t, f, general.bottom, "USB");
     let usb = widgets::list(&mut c, t, f, y, &[Row::new(l.pick(["文件传输", "檔案傳輸", "File transfer"])).icon(BLUE, Icon::Usb).trail(Trail::Switch(s.file_transfer))]);
     out.extend(hits(&usb.rows, &[Action::Toggle(Switch::FileTransfer)]));
@@ -377,6 +387,28 @@ pub fn screen_off(cx: &Ctx) -> Frame {
     Frame::new(t, c, hits(&times.rows, &picks), l.pick(SCREEN_TIMEOUT), top)
 }
 
+/// How a refresh rate of [`REFRESH_RATES`] is named on the pages, hertz.
+fn refresh_rate_name(l: Lang, hz: u32) -> String {
+    tr!(l, "{hz} Hz", "{hz} Hz", "{hz} Hz")
+}
+
+/// The rate the panel is driven at, opened from the settings.
+pub fn refresh_rate(cx: &Ctx) -> Frame {
+    let (t, f, s, l) = (cx.t, cx.f, cx.state, cx.state.lang);
+    let mut c = page(cx);
+    let top = t.m.content_top;
+    let labels: Vec<String> = REFRESH_RATES.iter().map(|&hz| refresh_rate_name(l, hz)).collect();
+    let rows: Vec<Row> = labels.iter().enumerate().map(|(k, label)| Row::new(label).trail(Trail::Check(s.refresh_rate == k))).collect();
+    let rates = widgets::list(&mut c, t, f, top, &rows);
+    let picks: Vec<Action> = (0..REFRESH_RATES.len()).map(Action::RefreshRate).collect();
+    let note = l.pick([
+        "更高的刷新率画面更流畅，但也更耗电。改动的刷新率在下次进入 recovery 时生效。",
+        "更高的更新率畫面更流暢，但也更耗電。變更的更新率在下次進入 recovery 時生效。",
+        "A higher rate moves on more smoothly and uses more charge. A new rate applies the next time the recovery starts.",
+    ]);
+    let y = widgets::footnote(&mut c, t, f, rates.bottom, note);
+    Frame::new(t, fit(c, t, y), hits(&rates.rows, &picks), l.pick(REFRESH_RATE), top)
+}
 /// Mount manager: the slot's partitions, each with a switch to mount it
 /// read-only or unmount it; one that programs are using says which, and
 /// stays.
@@ -445,7 +477,7 @@ pub fn mount(cx: &Ctx) -> Frame {
 }
 
 /// Who made the recovery, as the About page names them under its version.
-const AUTHOR: &str = "© 2026 Kirk Lin";
+const AUTHOR: &str = "© 2026 Kirk Lin · 洛寻镛 · 超级小爱 · 大肥鱼";
 
 /// About this device, modelled on the stock「我的设备」: the wordmark, the
 /// version and its author over a moving colour field, and the summary,
@@ -962,16 +994,70 @@ fn reflashed(c: &mut Canvas, cx: &Ctx, y: f32) -> f32 {
     }
 }
 
-/// What the install script showed, where there is any: its heading, and
-/// under it the lines as the page's long list, the last thing on the page.
+/// What the step under way has left and how fast it moves: how many seconds
+/// are left, the rate it runs at now, how long it has been at it, and the
+/// rate over the whole of it. One line under the card that says how far it
+/// is, above the install script's own output, which it leaves its room.
+fn pace_line(c: &mut Canvas, cx: &Ctx, y: f32) -> f32 {
+    let (t, f, l) = (cx.t, cx.f, cx.state.lang);
+    let pace = &cx.state.pace;
+    if !pace.known() {
+        return y;
+    }
+    let (left, now, elapsed, overall) = (pace.left(), pace.rate(), pace.elapsed(), pace.overall());
+    // The seconds left only once a rate has settled: said from the start, a
+    // step whose rate is not known yet would give a number that jumps about.
+    let said = match (left, now, overall) {
+        (Some(left), Some(now), Some(overall)) => tr!(
+            l,
+            "距离刷写完成还要 {left} 秒，速度 {now}/s，已用时 {elapsed} 秒，平均 {overall}/s",
+            "距離刷寫完成還要 {left} 秒，速度 {now}/s，已耗時 {elapsed} 秒，平均 {overall}/s",
+            "{left} s left · {now}/s · {elapsed} s so far · {overall}/s on average"
+        ),
+        (None, Some(now), None) => tr!(l, "正在刷写，速度 {now}/s", "正在刷寫，速度 {now}/s", "Writing at {now}/s"),
+        (None, Some(now), Some(overall)) => tr!(
+            l,
+            "速度 {now}/s，已用时 {elapsed} 秒，平均 {overall}/s",
+            "速度 {now}/s，已耗時 {elapsed} 秒，平均 {overall}/s",
+            "{now}/s · {elapsed} s so far · {overall}/s on average"
+        ),
+        _ => return y,
+    };
+    widgets::footnote(c, t, f, y, &said)
+}
+
+/// What the install script showed, where there is any: its heading with how
+/// far it says it is, and under it the lines as the page's long list, the
+/// last thing on the page.
 fn script_output(c: &mut Canvas, cx: &Ctx, y: f32, rows: &mut Option<Rows>) -> f32 {
     let lines = &cx.state.script_output;
     if lines.is_empty() {
         return y;
     }
-    let y = widgets::section(c, cx.t, cx.f, y, cx.state.lang.pick(["安装脚本输出", "安裝指令碼輸出", "Install script output"]));
+    let l = cx.state.lang;
+    let said = l.pick(["安装脚本输出", "安裝指令碼輸出", "Install script output"]);
+    // How far the script says it is, as it says it: a thousandth at a time,
+    // which its own progress line gives where it writes one.
+    let heading = match install_stage(&cx.state.install) {
+        Some(Stage::Script { thousandths }) => {
+            let p = (*thousandths as f32 / 10.0).round() as u32;
+            format!("{said} · {p}%")
+        }
+        _ => said.to_string(),
+    };
+    let y = widgets::section(c, cx.t, cx.f, y, &heading);
     *rows = Some(Rows { edges: widgets::output_edges(c, cx.t, cx.f, y, lines), action: None });
     y
+}
+
+/// The step an install is at, where it is at one.
+fn install_stage(install: &Install) -> Option<&Stage> {
+    match install {
+        Install::Checking { stage, .. } | Install::Updating { stage, .. } | Install::Flashing { stage, .. } | Install::Scripting { stage, .. } => {
+            stage.as_ref()
+        }
+        _ => None,
+    }
 }
 
 fn pick_title(l: Lang, pick: Pick, current: Option<Slot>) -> String {
@@ -1200,7 +1286,7 @@ pub fn installing(cx: &Ctx) -> Frame {
                 ]);
                 widgets::footnote(&mut c, t, f, y, note)
             } else {
-                y
+                pace_line(&mut c, cx, y)
             }
         }
         Install::Flashing { partition, stage } => {
@@ -1227,7 +1313,8 @@ pub fn installing(cx: &Ctx) -> Frame {
                     ["刷入完成前，请不要拔出 U 盘。", "刷入完成前，請不要拔出 USB 隨身碟。", "Keep the USB drive in until it's flashed."]
                 }
             });
-            widgets::footnote(&mut c, t, f, y, keep)
+            let y = widgets::footnote(&mut c, t, f, y, keep);
+            pace_line(&mut c, cx, y)
         }
         Install::ConfirmingScript => {
             let name = s.package_name.as_deref().unwrap_or(l.pick(["刷机包", "刷機包", "Flashable zip"]));
@@ -1250,6 +1337,9 @@ pub fn installing(cx: &Ctx) -> Frame {
             let (detail, done) = script_stage(l, stage.as_ref(), &s.script_output);
             let y = widgets::progress_card(&mut c, t, f, top, l.pick(["正在安装", "正在安裝", "Installing"]), detail, done);
             let y = widgets::footnote(&mut c, t, f, y, until_installed(l, s.source));
+            // How fast it moves on and how long it has left, over the
+            // script's own output, which keeps its room below.
+            let y = pace_line(&mut c, cx, y);
             script_output(&mut c, cx, y, &mut rows)
         }
         Install::Wiping => {
@@ -1731,7 +1821,7 @@ pub fn restore(cx: &Ctx) -> Frame {
             .backups
             .iter()
             .map(|b| match &b.held {
-                Ok(h) => (fmt::datetime(l, h.made, s.time_zone), format!("{} · {} · {}", fmt::parts(l, &h.parts), fmt::bytes(h.size), place_name(l, b.place))),
+                Ok(h) => (fmt::datetime_clocked(l, h.made, s.time_zone, s.hour24), format!("{} · {} · {}", fmt::parts(l, &h.parts), fmt::bytes(h.size), place_name(l, b.place))),
                 Err(_) => (b.name.clone(), format!("{} · {}", l.pick(UNREADABLE), place_name(l, b.place))),
             })
             .collect();
@@ -1773,7 +1863,7 @@ pub fn restore_backup(cx: &Ctx) -> Frame {
         }
         Ok(held) => {
             let mut facts = vec![
-                (l.pick(["备份时间", "備份時間", "Made"]), fmt::datetime(l, held.made, s.time_zone)),
+                (l.pick(["备份时间", "備份時間", "Made"]), fmt::datetime_clocked(l, held.made, s.time_zone, s.hour24)),
                 (l.pick(["大小", "大小", "Size"]), fmt::bytes(held.size)),
                 (location, place_name(l, entry.place).to_string()),
             ];
@@ -2893,7 +2983,7 @@ pub fn file_info(cx: &Ctx) -> Frame {
             facts.push((l.pick(["大小", "大小", "Size"]), tr!(l, "{size}（{bytes} 字节）", "{size}（{bytes} 位元組）", "{size} ({bytes} bytes)")))
         }
     }
-    facts.push((l.pick(["修改时间", "修改時間", "Modified"]), fmt::datetime(l, e.modified, s.time_zone)));
+    facts.push((l.pick(["修改时间", "修改時間", "Modified"]), fmt::datetime_clocked(l, e.modified, s.time_zone, s.hour24)));
     let (mode, uid, gid) = (fmt::mode(e.mode), e.uid, e.gid);
     facts.push((l.pick(PERMISSIONS), tr!(l, "{mode}，所有者 {uid}，用户组 {gid}", "{mode}，擁有者 {uid}，群組 {gid}", "{mode}, owner {uid}, group {gid}")));
     let y = widgets::info_card(&mut c, t, f, top, &facts);

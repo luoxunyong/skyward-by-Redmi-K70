@@ -42,9 +42,16 @@ impl std::fmt::Display for Reach {
 
 /// Ask `page`, a plain HTTP address, looking its host up in `servers`.
 pub fn probe(page: &str, servers: &[Ipv4Addr]) -> Reach {
+    probe_at(page, servers).0
+}
+
+/// Ask `page`, a plain HTTP address, looking its host up in `servers`, and
+/// give how far the network reaches beside the time the answer's own server
+/// said it was, in Unix seconds, where it said one.
+pub fn probe_at(page: &str, servers: &[Ipv4Addr]) -> (Reach, Option<i64>) {
     match answer(page, servers) {
-        Ok((code, location)) => judge(page, code, location),
-        Err(e) => Reach::Offline(format!("{e:#}")),
+        Ok((code, location, date)) => (judge(page, code, location), date),
+        Err(e) => (Reach::Offline(format!("{e:#}")), None),
     }
 }
 
@@ -59,8 +66,9 @@ fn judge(page: &str, code: u16, location: Option<String>) -> Reach {
     }
 }
 
-/// What `page` answers: its status, and where it sends on to.
-fn answer(page: &str, servers: &[Ipv4Addr]) -> Result<(u16, Option<String>)> {
+/// What `page` answers: its status, where it sends on to, and the time its
+/// server said it was, in Unix seconds.
+fn answer(page: &str, servers: &[Ipv4Addr]) -> Result<(u16, Option<String>, Option<i64>)> {
     let uri: Uri = page.parse().with_context(|| format!("{page} is not an address"))?;
     let (host, authority) = match (uri.host(), uri.authority()) {
         (Some(host), Some(authority)) => (host, authority.as_str()),
@@ -84,7 +92,7 @@ fn answer(page: &str, servers: &[Ipv4Addr]) -> Result<(u16, Option<String>)> {
 /// names are spelled as browsers spell them, Host with a capital, and the
 /// HTTP client the rest of the recovery uses writes every name in small
 /// letters, so the request is written here as a browser writes it.
-fn ask(mut stream: TcpStream, authority: &str, path: &str) -> Result<(u16, Option<String>)> {
+fn ask(mut stream: TcpStream, authority: &str, path: &str) -> Result<(u16, Option<String>, Option<i64>)> {
     stream.set_read_timeout(Some(WAIT)).context("time the connection")?;
     stream.set_write_timeout(Some(WAIT)).context("time the connection")?;
     stream.write_all(format!("GET {path} HTTP/1.1\r\nHost: {authority}\r\nConnection: close\r\n\r\n").as_bytes()).context("send the request")?;
@@ -103,10 +111,69 @@ fn ask(mut stream: TcpStream, authority: &str, path: &str) -> Result<(u16, Optio
         if response.parse(&head).context("read the head of the answer")?.is_complete() {
             let code = response.code.context("the answer has no status")?;
             let location = response.headers.iter().find(|h| h.name.eq_ignore_ascii_case("location")).map(|h| String::from_utf8_lossy(h.value).into_owned());
-            return Ok((code, location));
+            let date = response.headers.iter().find(|h| h.name.eq_ignore_ascii_case("date")).and_then(|h| Date::parse(&String::from_utf8_lossy(h.value)));
+            return Ok((code, location, date));
         }
         ensure!(head.len() < HEAD, "the head of the answer runs past {HEAD} bytes");
     }
+}
+
+/// An HTTP `Date` header, `Sun, 06 Nov 1994 08:49:37 GMT`: the Unix seconds
+/// it names.
+pub struct Date;
+
+impl Date {
+    /// The Unix seconds the header `text` names; `None` when it is not a
+    /// date in the form HTTP sends.
+    pub fn parse(text: &str) -> Option<i64> {
+        // The day and month names an HTTP date starts with, and the month
+        // it names, numbered from one.
+        let rest = text.trim();
+        let (_, rest) = rest.split_once(", ")?;
+        let mut parts = rest.split(' ');
+        let day: i64 = parts.next()?.parse().ok()?;
+        let month = match parts.next()? {
+            "Jan" => 1,
+            "Feb" => 2,
+            "Mar" => 3,
+            "Apr" => 4,
+            "May" => 5,
+            "Jun" => 6,
+            "Jul" => 7,
+            "Aug" => 8,
+            "Sep" => 9,
+            "Oct" => 10,
+            "Nov" => 11,
+            "Dec" => 12,
+            _ => return None,
+        };
+        let year: i64 = parts.next()?.parse().ok()?;
+        let time = parts.next()?;
+        if !parts.next()?.eq_ignore_ascii_case("GMT") {
+            return None;
+        }
+        let mut clock = time.split(':');
+        let (hour, minute, second): (i64, i64, i64) = (clock.next()?.parse().ok()?, clock.next()?.parse().ok()?, clock.next()?.parse().ok()?);
+        if clock.next().is_some() || !(1..=31).contains(&day) || hour > 23 || minute > 59 || second > 60 {
+            return None;
+        }
+        Some(seconds(year, month, day, hour, minute, second.min(59)))
+    }
+}
+
+/// The Unix seconds of a civil date and time, by the Gregorian calendar,
+/// counted from 1970 as the C library counts it.
+fn seconds(year: i64, month: i64, day: i64, hour: i64, minute: i64, second: i64) -> i64 {
+    // Days from 1970-01-01 to `year`-`month`-`day`, as Howard Hinnant's
+    // `days_from_civil` counts them.
+    let y = if month <= 2 { year - 1 } else { year };
+    let era = if y >= 0 { y } else { y - 399 } / 400;
+    let yoe = y - era * 400;
+    let mp = (month + 9) % 12;
+    let doy = (153 * mp + 2) / 5 + day - 1;
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    let days = era * 146_097 + doe - 719_468;
+    days * 86_400 + hour * 3600 + minute * 60 + second
 }
 
 #[cfg(test)]
@@ -164,5 +231,24 @@ mod tests {
         let Reach::Offline(why) = probe(&format!("http://127.0.0.1:{port}/generate_204"), &[]) else { panic!("a closed port reaches nothing") };
         assert!(why.contains("could not reach 127.0.0.1"), "{why}");
         assert!(matches!(probe("http://connect.rom.miui.com/generate_204", &[]), Reach::Offline(_)), "a name without a DNS server to ask");
+    }
+
+    #[test]
+    fn an_answers_date_is_the_time_its_server_said_it_was() {
+        // 2026-11-06 12:06:31 GMT.
+        assert_eq!(Date::parse("Fri, 06 Nov 2026 12:06:31 GMT"), Some(1_793_966_791));
+        assert_eq!(Date::parse("Thu, 01 Jan 1970 00:00:00 GMT"), Some(0), "the epoch itself");
+        assert_eq!(Date::parse("Sat, 29 Feb 2020 23:59:59 GMT"), Some(1_583_020_799), "a leap day");
+        assert_eq!(Date::parse("Fri, 06 Nov 2026 12:06:31 CET"), None, "not the time zone HTTP sends");
+        assert_eq!(Date::parse("yesterday"), None);
+        assert_eq!(Date::parse("Fri, 32 Nov 2026 12:06:31 GMT"), None, "no such day");
+    }
+
+    #[test]
+    fn a_page_that_says_when_it_answered_gives_the_time() {
+        let page = gateway("HTTP/1.1 204 No Content\r\nDate: Thu, 01 Jan 1970 00:00:00 GMT\r\nContent-Length: 0\r\n\r\n");
+        assert_eq!(probe_at(&page, &[]), (Reach::Online, Some(0)));
+        let page = gateway("HTTP/1.1 204 No Content\r\nContent-Length: 0\r\n\r\n");
+        assert_eq!(probe_at(&page, &[]), (Reach::Online, None), "an answer with no date");
     }
 }

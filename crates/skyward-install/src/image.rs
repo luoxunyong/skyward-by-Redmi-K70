@@ -136,13 +136,22 @@ fn holds(packed: impl Read, wanted: impl Fn(&str) -> bool) -> Result<bool> {
 /// Whether `file` is a Skyward recovery: a boot image whose ramdisk carries
 /// the device configuration Skyward is packed with, packed in one of the
 /// ways read here, as Skyward packs it.
+///
+/// A partition this cannot read through — an image of another recovery,
+/// whose ramdisk is packed in a way not read here, or one the install
+/// wrote while the kernel still held the pages before — is not Skyward:
+/// saying so puts this recovery back into it, where failing the whole
+/// answer would leave whatever is there in it for good.
 pub fn is_skyward<R: Read + Seek>(file: &mut R) -> Result<bool> {
     let mut head = Vec::with_capacity(4096);
     file.take(4096).read_to_end(&mut head).context("read the image's first bytes")?;
     if !head.starts_with(BOOT_MAGIC) {
         return Ok(false);
     }
-    let header = Header::parse(&mut Cursor::new(&head)).context("read the boot image header")?;
+    let header = match Header::parse(&mut Cursor::new(&head)) {
+        Ok(header) => header,
+        Err(_) => return Ok(false),
+    };
     if header.ramdisk_size() == 0 {
         return Ok(false);
     }
@@ -152,7 +161,9 @@ pub fn is_skyward<R: Read + Seek>(file: &mut R) -> Result<bool> {
     if ![LZ4_LEGACY, LZ4_FRAME, GZIP, NEWC].iter().any(|magic| start.starts_with(magic)) {
         return Ok(false);
     }
-    holds(ramdisk, |name| name == skyward_config::ramdisk::CONFIG).context("read the ramdisk")
+    // A ramdisk packed as a newc archive that does not read to its end is
+    // another recovery's, not this one's.
+    Ok(holds(ramdisk, |name| name == skyward_config::ramdisk::CONFIG).unwrap_or(false))
 }
 
 /// The partition `name` of `slot` among the links in `dir`.
@@ -227,20 +238,57 @@ pub fn flash<R: Read + Seek>(image: &mut R, len: u64, devices: &[PathBuf], progr
         f.sync_all().with_context(|| format!("flush {}", path.display()))?;
         drop_cache(f).with_context(|| format!("drop the cached pages of {}", path.display()))?;
     }
+    // A partition written just now can read back before the flash itself
+    // holds what was written: the pages come from the cache the drop left,
+    // or from a controller still settling. Reading again gives it the time.
     for (path, f, _) in &mut outs {
-        f.seek(SeekFrom::Start(0)).with_context(|| format!("rewind {}", path.display()))?;
-        let mut back = Sha256::new();
-        let mut left = end;
-        while left > 0 {
-            let n = left.min(CHUNK as u64) as usize;
-            f.read_exact(&mut buf[..n]).with_context(|| format!("read back {}", path.display()))?;
-            back.update(&buf[..n]);
-            left -= n as u64;
-            done += n as u64;
-            progress(done, total);
+        let mut last = String::new();
+        for attempt in 0..READ_BACK_TRIES {
+            match read_back(f, end, &written, &mut buf, &mut done, total, &mut *progress) {                Ok(()) => {
+                    last.clear();
+                    break;
+                }
+                Err(e) => {
+                    last = format!("{e:#}");
+                    if attempt + 1 < READ_BACK_TRIES {
+                        let _ = drop_cache(f);
+                        let _ = f.sync_all();
+                    }
+                }
+            }
         }
-        ensure!(back.finalize() == written, "{} reads back different from what was written", path.display());
+        ensure!(last.is_empty(), "{} reads back different from what was written: {last}", path.display());
     }
+    Ok(())
+}
+
+/// How many times a partition written is read back before the write is
+/// called lost.
+const READ_BACK_TRIES: usize = 3;
+
+/// Read `end` bytes of `f` from its start and compare them with `written`,
+/// by what they hash to.
+fn read_back(
+    f: &mut File,
+    end: u64,
+    written: &sha2::digest::Output<Sha256>,
+    buf: &mut [u8],
+    done: &mut u64,
+    total: u64,
+    progress: &mut dyn FnMut(u64, u64),
+) -> Result<()> {
+    f.seek(SeekFrom::Start(0)).context("rewind")?;
+    let mut back = Sha256::new();
+    let mut left = end;
+    while left > 0 {
+        let n = left.min(CHUNK as u64) as usize;
+        f.read_exact(&mut buf[..n]).context("read back")?;
+        back.update(&buf[..n]);
+        left -= n as u64;
+        *done += n as u64;
+        progress(*done, total);
+    }
+    ensure!(&back.finalize() == written, "a different digest");
     Ok(())
 }
 

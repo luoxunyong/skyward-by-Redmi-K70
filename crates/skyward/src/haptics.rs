@@ -1,6 +1,6 @@
 use anyhow::{anyhow, ensure, Context, Result};
 use evdev::raw_stream::RawDevice;
-use skyward_config::Strength;
+use skyward_config::{Strength, Vmax};
 use std::f32::consts::TAU;
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, Write};
@@ -33,6 +33,9 @@ pub struct Haptics {
     dev: File,
     click: Click,
     strength: Strength,
+    /// The driver's top-voltage file the slider writes, where the phone's
+    /// own settings strength the motor through it.
+    vmax: Option<Vmax>,
     /// The click playing, by its slot and its count, until it is taken
     /// away; a click taken away early by the next is not taken away again.
     playing: Arc<Mutex<Option<(i16, u64)>>>,
@@ -66,7 +69,7 @@ impl Haptics {
             }
             (None, None) => unreachable!("the configuration names a click of one kind"),
         };
-        Ok(Haptics { dev, click, strength: cfg.strength, playing: Arc::new(Mutex::new(None)), clicks: 0 })
+        Ok(Haptics { dev, click, strength: cfg.strength, vmax: cfg.vmax.clone(), playing: Arc::new(Mutex::new(None)), clicks: 0 })
     }
 
     /// One short click at the strength the slider's `position` gives, after
@@ -75,6 +78,10 @@ impl Haptics {
         let mut playing = self.playing.lock().expect("no thread panics while it holds the click playing");
         if let Some((slot, _)) = playing.take() {
             erase(&self.dev, slot).context("take away the click still playing")?;
+        }
+        if let Some(v) = &self.vmax {
+            let mv = scaled(v.lightest, v.strongest, position);
+            fs::write(&v.path, format!("{}", mv.round() as u32)).with_context(|| format!("write {}", v.path))?;
         }
         let loaded = upload(&self.dev, &self.click, share(&self.strength, position)).context("load the click")?;
         play(&mut self.dev, loaded.slot).context("play the click")?;
@@ -128,7 +135,13 @@ fn takes_periodic(dev: &RawDevice) -> bool {
 
 /// The share of the click's full strength at the slider's `position`.
 fn share(strength: &Strength, position: f32) -> f32 {
-    strength.lightest * (strength.strongest / strength.lightest).powf(position.clamp(0.0, 1.0))
+    scaled(strength.lightest, strength.strongest, position)
+}
+
+/// From `lightest` to `strongest` at the slider's `position`, each
+/// step the same factor stronger.
+fn scaled(lightest: f32, strongest: f32, position: f32) -> f32 {
+    lightest * (strongest / lightest).powf(position.clamp(0.0, 1.0))
 }
 
 /// The motor's resonant frequency in hertz, from the file the driver says
