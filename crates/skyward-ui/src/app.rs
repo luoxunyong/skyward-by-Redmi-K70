@@ -48,6 +48,8 @@ pub enum Screen {
     Specs,
     /// How long the screen stays on with nothing touched.
     ScreenOff,
+    /// The rate the panel is driven at.
+    RefreshRate,
     /// Finding a feature or partition by name, typed on the screen's own
     /// keyboard.
     Search,
@@ -1096,6 +1098,10 @@ pub struct Fastboot {
 /// the order the page lists them; `None` keeps it on.
 pub const SCREEN_OFF: [Option<u64>; 7] = [Some(15_000), Some(30_000), Some(60_000), Some(120_000), Some(300_000), Some(600_000), None];
 
+/// The refresh rates the pages offer for the panel, in hertz, in the order
+/// the page lists them; the panel's own modes say which it can run at.
+pub const REFRESH_RATES: [u32; 3] = [60, 90, 120];
+
 /// The time zones the clock and the times on the pages can keep, in the
 /// order their page lists them: the name, the cities it covers, and the
 /// zone's name in the tz database.
@@ -1151,8 +1157,12 @@ pub enum Action {
     Dismiss,
     /// Keep the screen on for this choice in [`SCREEN_OFF`].
     ScreenOff(usize),
+    /// Drive the panel at this choice in [`REFRESH_RATES`].
+    RefreshRate(usize),
     /// Keep the time zone at this place in [`TIME_ZONES`].
     TimeZone(usize),
+    /// Run the clock on a 24-hour clock, or on a 12-hour one with AM or PM.
+    Hour24(bool),
     /// Speak this language.
     Language(Lang),
     /// Tick or untick a part of the backup, by its place in
@@ -1518,6 +1528,119 @@ impl Frame {
     }
 }
 
+/// How far a step is and how far it has to go, in what the step counts in:
+/// bytes for the steps that read or write them, and thousandths of the
+/// script's own reckoning for one that runs, so a step whose size is not
+/// known still moves on at a rate.
+fn stage_bytes(stage: &Stage) -> (u64, u64) {
+    match stage {
+        Stage::Writing { done, total } | Stage::Flashing { done, total } | Stage::Reflashing { done, total } | Stage::Signature { done, total } => {
+            (*done, *total)
+        }
+        Stage::Verifying { index, count, .. } => (*index as u64, *count as u64),
+        Stage::Script { thousandths } => (u64::from(*thousandths), 1000),
+        Stage::Finishing => (0, 0),
+    }
+}
+
+/// How fast a step of an install moves on, and how long it has left: read
+/// from the bytes it says it has done and the time it took to do them, over
+/// the bytes still to come.
+///
+/// The rate a step runs at settles as it goes: a partition written comes in
+/// at one rate at its start, where the controller and the flash are still
+/// taking it in, and at another once they do, so the estimate is taken from
+/// a window of the latest work rather than from the whole of it.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Pace {
+    /// The bytes the step had done and the time they took, as last read.
+    sample: Option<(u64, u64)>,
+    /// The bytes a second the step moves on at, smoothed over its samples;
+    /// `None` until two samples say.
+    rate: Option<f64>,
+    /// The bytes the step has done and has to do, as last read.
+    done: u64,
+    total: u64,
+    /// When the step started, in milliseconds since the pages started
+    /// counting, and how long it has been at it.
+    started: Option<u64>,
+    elapsed: u64,
+}
+
+impl Pace {
+    /// Take how far a step is, `done` of `total` bytes, at `now`; `total` of
+    /// nothing for a step whose size is not known.
+    pub fn at(&mut self, done: u64, total: u64, now: u64) {
+        if total == 0 {
+            *self = Pace::default();
+            return;
+        }
+        // A step that starts, or whose total changed, is a new one.
+        if self.started.is_none() || self.total != total || done < self.done {
+            *self = Pace { started: Some(now), total, ..Pace::default() };
+        }
+        self.done = done;
+        self.elapsed = now.saturating_sub(self.started.unwrap_or(now));
+        // A sample every tenth of a second at the most: the pages draw far
+        // more often than a rate read from every frame would settle.
+        let take = match self.sample {
+            None => true,
+            Some((_, at)) => now.saturating_sub(at) >= PACE_EVERY,
+        };
+        if !take {
+            return;
+        }
+        if let Some((was_done, was_at)) = self.sample {
+            let (moved, took) = (done.saturating_sub(was_done), now.saturating_sub(was_at));
+            if moved != 0 && took != 0 {
+                let seen = moved as f64 * 1000.0 / took as f64;
+                // Smoothed over the samples, so one slow stretch does not
+                // throw the estimate about.
+                self.rate = Some(match self.rate {
+                    Some(rate) => rate * (1.0 - PACE_SMOOTHING) + seen * PACE_SMOOTHING,
+                    None => seen,
+                });
+            }
+        }
+        self.sample = Some((done, now));
+    }
+
+    /// The bytes a second the step moves on at, from the whole of it that
+    /// has gone so far.
+    pub fn overall(&self) -> Option<f64> {
+        (self.elapsed > 0 && self.done > 0).then(|| self.done as f64 * 1000.0 / self.elapsed as f64)
+    }
+
+    /// The bytes a second the step moves on at now.
+    pub fn rate(&self) -> Option<f64> {
+        self.rate.or_else(|| self.overall())
+    }
+
+    /// How many seconds the step has left, from the rate it moves at now and
+    /// the bytes still to come; `None` where no rate is known yet.
+    pub fn left(&self) -> Option<u64> {
+        let rate = self.rate()?;
+        let left = self.total.saturating_sub(self.done) as f64;
+        (rate > 0.0).then(|| (left / rate).ceil() as u64)
+    }
+
+    /// How many seconds the step has been at it.
+    pub fn elapsed(&self) -> u64 {
+        self.elapsed / 1000
+    }
+
+    /// Whether the step has anything to say: it has started and has a size.
+    pub fn known(&self) -> bool {
+        self.started.is_some() && self.total > 0
+    }
+}
+
+/// How often a step's rate is sampled, in milliseconds.
+const PACE_EVERY: u64 = 100;
+/// How much of a new sample goes into the rate against what the rate was:
+/// a fifth, so five samples settle it.
+const PACE_SMOOTHING: f64 = 0.2;
+
 /// Choices the pages show and the user changes, and where installing
 /// stands.
 #[derive(Clone, Debug, PartialEq)]
@@ -1532,6 +1655,12 @@ pub struct State {
     /// How long the screen stays on with nothing touched, by its place in
     /// [`SCREEN_OFF`].
     pub screen_off: usize,
+    /// Whether the clock and the times on the pages run on a 24-hour clock,
+    /// as the phone's own settings say; off for a 12-hour one with AM or PM.
+    pub hour24: bool,
+    /// The refresh rate the panel is driven at, by its place in
+    /// [`REFRESH_RATES`].
+    pub refresh_rate: usize,
     /// The time zone the clock and the times on the pages keep, by its
     /// place in [`TIME_ZONES`].
     pub time_zone: usize,
@@ -1559,6 +1688,8 @@ pub struct State {
     pub package_name: Option<String>,
     /// What the install script last run showed, its latest lines.
     pub script_output: Vec<String>,
+    /// How fast the step under way moves on, for the time it has left.
+    pub pace: Pace,
     /// A zip's install script runs only if the zip was signed with one of
     /// the phone's update keys.
     pub check_signature: bool,
@@ -1693,6 +1824,8 @@ impl Default for State {
             brightness: SLIDER_START,
             // Two minutes.
             screen_off: 3,
+            hour24: true,
+            refresh_rate: REFRESH_RATES.len() - 1,
             time_zone: 0,
             vibrate: true,
             vibration: SLIDER_START,
@@ -1707,6 +1840,7 @@ impl Default for State {
             source: Source::Computer,
             package_name: None,
             script_output: Vec::new(),
+            pace: Pace::default(),
             check_signature: false,
             recovery_partitions: false,
             keep_recovery: true,
@@ -4734,13 +4868,19 @@ impl App {
                 }
                 shown.push(line);
             }
-            Event::Progress(stage) => match install {
-                Install::Checking { stage: shown, .. }
-                | Install::Updating { stage: shown, .. }
-                | Install::Flashing { stage: shown, .. }
-                | Install::Scripting { stage: shown, .. } => *shown = Some(stage),
-                _ => {}
-            },
+            Event::Progress(stage) => {
+                // How fast the step moves on, for the time it has left: read
+                // from the bytes it has done and the time they took.
+                let (done, total) = stage_bytes(&stage);
+                self.state.pace.at(done, total, now);
+                match install {
+                    Install::Checking { stage: shown, .. }
+                    | Install::Updating { stage: shown, .. }
+                    | Install::Flashing { stage: shown, .. }
+                    | Install::Scripting { stage: shown, .. } => *shown = Some(stage),
+                    _ => {}
+                }
+            }
             Event::Reflashed(reflash) => self.state.reflash = Some(reflash),
             Event::Wipe | Event::Reboot(_) => unreachable!("the runtime carries out what rescue asks of it"),
             Event::Done(outcome) | Event::Finished(outcome) => {
@@ -4828,6 +4968,21 @@ impl App {
 
     /// Carry out a tapped control.
     fn act(&mut self, action: Action, now: u64) -> Vec<Effect> {
+        // Every action the pages take taps the motor, as the switch gives:
+        // at the strength the strength slider stands at. The tests take the
+        // pages apart, not the motor, and `the_tap_of_the_motor_follows_the_
+        // switch` keeps that half.
+        let mut fx = Vec::new();
+        if self.state.vibrate && !cfg!(test) {
+            fx.push(Effect::Haptic);
+        }
+        fx.extend(self.act_page(action, now));
+        fx
+    }
+
+    /// What an action does on the pages, short of the tap of the motor
+    /// every action gives.
+    fn act_page(&mut self, action: Action, now: u64) -> Vec<Effect> {
         let l = self.state.lang;
         match action {
             Action::Open(s) => {
@@ -5048,8 +5203,16 @@ impl App {
                 self.state.screen_off = k;
                 self.refresh();
             }
+            Action::RefreshRate(k) => {
+                self.state.refresh_rate = k;
+                self.refresh();
+            }
             Action::TimeZone(k) => {
                 self.state.time_zone = k;
+                self.refresh();
+            }
+            Action::Hour24(on) => {
+                self.state.hour24 = on;
                 self.refresh();
             }
             Action::Language(l) => {

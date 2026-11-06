@@ -46,8 +46,11 @@ const API_VERSION: &str = "3";
 const RETRY: &str = "retry";
 
 /// Scripts written for other recoveries start with the shell they find
-/// here, and look for programs where those recoveries keep them.
+/// here, and look for programs where those recoveries keep them. Some name
+/// bash in their shebang, which the ramdisk does not hold, so both names
+/// lead to the shell it does.
 const SBIN_SHELL: &str = "/sbin/sh";
+const SBIN_BASH: &str = "/sbin/bash";
 const SHELL: &str = "/system/bin/sh";
 const SCRIPT_PATH: &str = "/sbin:/system/bin:/system/xbin";
 
@@ -842,15 +845,18 @@ fn extract_script() -> Result<()> {
 
 /// Give scripts written for other recoveries the shell they start with.
 fn shell_at_sbin() -> Result<()> {
-    let link = Path::new(SBIN_SHELL);
-    match fs::symlink_metadata(link) {
-        Ok(_) => return Ok(()),
-        Err(e) if e.kind() == ErrorKind::NotFound => {}
-        Err(e) => return Err(e).with_context(|| format!("look at {SBIN_SHELL}")),
+    for name in [SBIN_SHELL, SBIN_BASH] {
+        let link = Path::new(name);
+        match fs::symlink_metadata(link) {
+            Ok(_) => continue,
+            Err(e) if e.kind() == ErrorKind::NotFound => {}
+            Err(e) => return Err(e).with_context(|| format!("look at {name}")),
+        }
+        let dir = link.parent().expect("the link is in a folder");
+        fs::create_dir_all(dir).with_context(|| format!("make {}", dir.display()))?;
+        symlink(SHELL, link).with_context(|| format!("link {name} to {SHELL}"))?;
     }
-    let dir = link.parent().expect("the link is in a folder");
-    fs::create_dir_all(dir).with_context(|| format!("make {}", dir.display()))?;
-    symlink(SHELL, link).with_context(|| format!("link {SBIN_SHELL} to {SHELL}"))
+    Ok(())
 }
 
 /// A line one of the install script's outputs gave.

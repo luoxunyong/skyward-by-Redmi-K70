@@ -484,7 +484,14 @@ pub mod kms {
     }
 
     impl KmsSurface {
+        /// Open the panel at its fastest mode.
         pub fn open(path: &str) -> Result<Self> {
+            KmsSurface::open_at(path, None)
+        }
+
+        /// Open the panel at the mode nearest `hz` hertz, where it has one,
+        /// and at its fastest otherwise.
+        pub fn open_at(path: &str, hz: Option<u32>) -> Result<Self> {
             let card = open_card(path)?;
             let res = card.resource_handles().context("read KMS resources")?;
 
@@ -502,16 +509,18 @@ pub mod kms {
                 .iter()
                 .find(|m| m.mode_type().contains(ModeTypeFlags::PREFERRED))
                 .ok_or_else(|| anyhow!("the panel reports no preferred mode"))?;
-            // The fastest refresh at the preferred size, the first listed among
-            // equals: Android scrolls at it, and the 13 Ultra's touch reports
-            // come at the same 120 Hz.
-            let mode = *conn
-                .modes()
-                .iter()
-                .filter(|m| m.size() == preferred.size())
-                .rev()
-                .max_by_key(|m| m.vrefresh())
-                .expect("the preferred mode itself has the preferred size");
+            // The rate asked for at the preferred size where the panel has
+            // one, the nearest to it where it has none; the fastest where
+            // none was asked for, which is what Android scrolls at and what
+            // the 13 Ultra's touch reports come at.
+            let same_size = || conn.modes().iter().filter(|m| m.size() == preferred.size());
+            let mode = match hz {
+                Some(hz) => same_size()
+                    .min_by_key(|m| m.vrefresh().abs_diff(hz))
+                    .expect("the preferred mode itself has the preferred size"),
+                None => same_size().rev().max_by_key(|m| m.vrefresh()).expect("the preferred mode itself has the preferred size"),
+            };
+            let mode = *mode;
             let (w, h) = (mode.size().0 as u32, mode.size().1 as u32);
 
             // The CRTC already driving the panel, or the first one an

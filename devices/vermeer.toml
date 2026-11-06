@@ -1,0 +1,122 @@
+[device]
+codename = "vermeer"
+brand = "Redmi"
+model = "Redmi K70"
+ab = true
+soc = { hans = "第二代骁龙®8移动平台", hant = "Snapdragon® 8 Gen 2 行動平台", en = "Snapdragon® 8 Gen 2 Mobile Platform" }
+os_version_prop = "ro.mi.os.version.incremental"
+
+[display]
+width = 1440
+height = 3200
+density = 530
+corner_radius = 140
+
+[modules]
+# system_dlkm holds rfkill, which cfg80211 asks for.
+sources = ["vendor_boot", "vendor_dlkm", "vendor", "system_dlkm"]
+# The touchscreen: Goodix (汇顶) behind Xiaomi's touch layer, named
+# goodix_core as in the TWRP built for this phone; its own dependencies
+# (panel_event_notifier, miev) load first from modules.dep. The qsee
+# modules carry the TEE traffic that data decryption needs.
+load = ["goodix_core", "xiaomi_touch"]
+
+# The Goodix controller reports positions itself once told to through
+# Xiaomi's touch layer; clicktouch_raw is what the phone's own
+# init.mi_device.rc writes to disable THP.
+[touch]
+writes = [
+    { path = "/sys/class/touch/touch_dev/enable_touch_raw", value = "0" },
+]
+
+[[service]]
+path = "/vendor/bin/sh"
+args = ["/vendor/bin/init.kernel.post_boot.sh"]
+libraries = ["/system/lib64", "/vendor/lib64"]
+oneshot = true
+user = "root"
+groups = ["root", "system", "wakelock", "graphics"]
+
+# Data decryption, copied from the tested ishtar (same SoC): the TEE
+# daemon first, the key service and the old-kind directory next, and the
+# credential service last.
+[[service]]
+path = "/vendor/bin/qseecomd"
+libraries = ["/system/lib64", "/vendor/lib64"]
+ready_property = "vendor.sys.listeners.registered"
+user = "root"
+groups = ["root", "drmrpc"]
+
+[[service]]
+path = "/vendor/bin/hw/android.hardware.security.keymint-service-qti"
+libraries = ["/system/lib64", "/vendor/lib64"]
+ready_service = "android.hardware.security.keymint.IKeyMintDevice/default"
+user = "system"
+groups = ["system", "drmrpc"]
+
+[[service]]
+path = "/mnt/system_ext/bin/hwservicemanager"
+libraries = ["/mnt/system/system/lib64/bootstrap", "/mnt/system/system/lib64", "/mnt/system_ext/lib64"]
+ready_property = "hwservicemanager.ready"
+user = "system"
+groups = ["system", "readproc"]
+
+[[service]]
+path = "/vendor/bin/hw/android.hardware.gatekeeper@1.0-service-qti"
+libraries = ["/system/lib64", "/vendor/lib64"]
+ready_hardware_service = "android.hardware.gatekeeper@1.0::IGatekeeper/default"
+user = "system"
+groups = ["system", "drmrpc"]
+
+# The boot control, at the vendor path the tested ishtar has it at: it
+# says which slot the bootloader starts next and switches it.
+[[service]]
+path = "/vendor/bin/hw/android.hardware.boot@1.2-service"
+libraries = ["/system/lib64", "/vendor/lib64"]
+ready_hardware_service = "android.hardware.boot@1.2::IBootControl/default"
+user = "root"
+groups = ["root"]
+
+[wlan]
+# rfkill first: cfg80211 asks for it, in the kernel's own system_dlkm.
+modules = ["qca_cld3_kiwi_v2"]
+writes = [{ path = "/sys/kernel/cnss/fs_ready", value = "1" }]
+firmware = [
+    { name = "wlan/qca_cld/kiwi_v2/WCNSS_qcom_cfg.ini", path = "/vendor/etc/wifi/kiwi_v2/WCNSS_qcom_cfg.ini" },
+    { name = "wlan/qca_cld/kiwi_v2/wlan_mac.bin", partition = "persist", path = "kiwi_v2/wlan_mac.bin" },
+]
+interface = "wlan0"
+supplicant = "/vendor/bin/hw/wpa_supplicant"
+libraries = ["/vendor/lib64", "/system/lib64"]
+service = "android.hardware.wifi.supplicant.ISupplicant/default"
+probe = "http://connect.rom.miui.com/generate_204"
+
+[update]
+server = "https://update.miui.com/updates/miotaV3.php"
+
+[stock]
+version = "OS3.0.307.0.WNKCNXM"
+package = "https://bkt-sgp-miui-ota-update-alisgp.oss-ap-southeast-1.aliyuncs.com/OS3.0.307.0.WNKCNXM/vermeer-ota_full-OS3.0.307.0.WNKCNXM-user-16.0-e8ac729fa5.zip"
+recovery = "58e508fe836d9f469e76440329d180a6556ed13ee42eb975a19124e7cc90c987"
+
+[haptics]
+click = 0
+strength = { lightest = 0.5, strongest = 1.0 }
+# The slider writes the motor's top voltage the way the phone's own
+# settings do, through the driver's file they use.
+vmax = { path = "/sys/class/qcom-haptics/mi_vmax_ctrl", lightest = 1000, strongest = 4000 }
+
+[backup]
+efs = ["modemst1", "modemst2", "fsg", "fsc", "persist"]
+data_skipped = ["vendor/tzstorage", "vendor/qtee", "vendor/fingerprint", "vendor/fpc", "vendor/goodix"]
+
+[wipe]
+logs = [
+    "/data/miuilog",
+    "/data/vendor/diag",
+    "/data/vendor/log",
+    "/data/vendor/ramdump",
+    "/data/vendor/ssrdump",
+    "/data/vendor/tombstones",
+    "/data/vendor/wlan_logs",
+]

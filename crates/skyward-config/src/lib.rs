@@ -211,6 +211,11 @@ pub struct Haptics {
     #[serde(default)]
     pub resonance: Option<String>,
     pub strength: Strength,
+    /// The file the driver takes the motor's top voltage from, on phones
+    /// whose own settings strength the motor through it: the slider then
+    /// writes it as it moves, the way the installed system does.
+    #[serde(default)]
+    pub vmax: Option<Vmax>,
 }
 
 /// How strongly the click plays, each as a share of the most its waveform
@@ -218,6 +223,16 @@ pub struct Haptics {
 /// strongest, each step the same factor stronger.
 #[derive(Debug, Clone, Copy, PartialEq, Deserialize)]
 pub struct Strength {
+    pub lightest: f32,
+    pub strongest: f32,
+}
+
+/// The motor's top voltage in millivolts, from the slider's lightest end
+/// to its strongest, each step the same factor stronger — the same file
+/// the phone's own settings write to strength the motor.
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+pub struct Vmax {
+    pub path: String,
     pub lightest: f32,
     pub strongest: f32,
 }

@@ -34,7 +34,7 @@ use skyward_ui::app::{
     App, Asked, BackupAt, BackupEnd, BackupEntry, BackupRefusal, ClashChoice, Data, DownloadEnd, Effect, EraseStop, FileKind, FileOp,
     FileRow, FileTask, FsAction, FsRow, Have, Held, ItemEnd, ItemState, JobEnd, Keys, MountFailure, Part, PartKind, PartStop, Place,
     RenameRefused, Screen, Shot, SkywardEnd, SkywardStage, Target, UsbDrive, UsbLink, Wipe, DATA_OPENING, DATA_PARTITION, DOWNLOADS,
-    INSTALL_UNFINISHED, USB_DRIVE,
+    INSTALL_UNFINISHED, REFRESH_RATES, SCREEN_OFF, USB_DRIVE,
 };
 use skyward_ui::settings::Keeper;
 use skyward_ui::surface::kms::KmsSurface;
@@ -784,9 +784,10 @@ fn answer(request: Request, fastboot: bool) -> Vec<Effect> {
     }
 }
 
-/// The time of day for the status bar, in the zone the settings chose.
-fn clock(zone: usize) -> Result<String> {
-    Ok(skyward_ui::fmt::clock(unix_now()?, zone))
+/// The time of day for the status bar, in the zone the settings chose, on
+/// the clock's form the settings chose.
+fn clock(zone: usize, twenty_four: bool) -> Result<String> {
+    Ok(skyward_ui::fmt::clock_hours(unix_now()?, zone, twenty_four))
 }
 
 /// Tell the kernel log how the data partition was mounted, where opening
@@ -954,6 +955,17 @@ fn install_options(app: &App) -> Options {
     Options { keep: app.state.keep_recovery && app.state.recovery_partitions, signed: app.state.check_signature }
 }
 
+/// What the pages hold that the next run reads back from misc.
+fn settings_of(app: &App) -> skyward_sys::bcb::Settings {
+    skyward_sys::bcb::Settings {
+        brightness: app.state.brightness,
+        vibration: app.state.vibration,
+        dark: app.state.dark,
+        screen_off: u32::try_from(app.state.screen_off).ok(),
+        refresh_rate: skyward_ui::app::REFRESH_RATES.get(app.state.refresh_rate).copied(),
+    }
+}
+
 /// How often the WLAN page scans while it shows.
 const SCAN_EVERY: Duration = Duration::from_secs(10);
 
@@ -1023,7 +1035,14 @@ pub fn run(cfg: &DeviceConfig, font: &Path, mono: &Path, request: bcb::Request, 
     }
     let mut info = skyward_info::collect(cfg)?;
     let fonts = Fonts::load(font, 0, mono)?;
-    let mut surface = KmsSurface::open("/dev/dri/card0")?;
+    // The rate the panel runs at: what the last run left, else what the
+    // installed system says, else the panel's fastest.
+    let remembered = skyward_sys::bcb::read_settings(&skyward_sys::bcb::misc());
+    let rate = remembered
+        .and_then(|s| s.refresh_rate)
+        .or_else(skyward_sys::settings::refresh_rate)
+        .or_else(|| skyward_ui::app::REFRESH_RATES.last().copied());
+    let mut surface = KmsSurface::open_at("/dev/dri/card0", rate)?;
     let (w, h) = surface.size();
     eprintln!("display {}", surface.describe());
     let mut inputs = Inputs::open(w, h, cfg.touch.writes.clone())?;
@@ -1058,6 +1077,21 @@ pub fn run(cfg: &DeviceConfig, font: &Path, mono: &Path, request: bcb::Request, 
     let locale = request.locale.as_deref().or(info.locale.as_deref());
     let named = locale.map(Lang::for_locale).transpose()?;
     app.take_settings(kept.settings(), named);
+    // What the installed system asks for where the pages have not been
+    // told: the clock's form, and the rate the panel runs at. The pages'
+    // own choices stand once they are made.
+    if !app.state.rate_chosen {
+        if let Some(hz) = skyward_sys::settings::refresh_rate() {
+            let k = REFRESH_RATES
+                .iter()
+                .position(|&rate| rate == hz)
+                .unwrap_or_else(|| REFRESH_RATES.iter().enumerate().min_by_key(|(_, &rate)| rate.abs_diff(hz)).map_or(0, |(k, _)| k));
+            app.state.refresh_rate = k;
+        }
+    }
+    if !app.state.hour_chosen {
+        app.state.hour24 = skyward_sys::settings::hour24().unwrap_or(app.state.lang != Lang::En);
+    }
     let mut keeper = Keeper::new(&kept);
     skyward_sys::kmsg(&format!(
         "the pages speak {:?}, {}, and the locale named is {}",
@@ -1272,8 +1306,20 @@ pub fn run(cfg: &DeviceConfig, font: &Path, mono: &Path, request: bcb::Request, 
     let mut plugged: Option<Plugged> = None;
     let mut seen: Option<String> = None;
     let mut drive_at = Instant::now();
+    let misc = skyward_sys::bcb::misc();
+    let mut remembered = Some(settings_of(&app));
     loop {
         let now = monotonic_ms();
+        // What the pages hold of brightness, strength, dark and how long
+        // the screen stays on goes to misc as it changes, for the next run
+        // to read.
+        let now_settings = settings_of(&app);
+        if remembered != Some(now_settings) {
+            if let Err(e) = skyward_sys::bcb::write_settings(&misc, &now_settings) {
+                eprintln!("remember the settings: {e:#}");
+            }
+            remembered = Some(now_settings);
+        }
         if leave_at.is_some_and(|at| now >= at) {
             leave_at = None;
             power(leave)?;
@@ -1295,7 +1341,7 @@ pub fn run(cfg: &DeviceConfig, font: &Path, mono: &Path, request: bcb::Request, 
                 other => unreachable!("time passing asks for nothing but a tap of the motor, not {other:?}"),
             }
         }
-        let time = clock(app.state.time_zone)?;
+        let time = clock(app.state.time_zone, app.state.hour24)?;
         if time != shown_clock {
             shown_clock = time;
             app.redraw();

@@ -19,6 +19,18 @@ const MEMTAG_MESSAGE: Range<u64> = 32 * 1024 + 64..32 * 1024 + 128;
 /// recovery to erase the phone by: from 16 KiB up to the system's own space.
 const WIPE_PACKAGE: Range<u64> = 16 * 1024..32 * 1024;
 
+/// The recovery's own remembered settings, in misc' free space between
+/// the bootloader message and the wipe package: brightness, the vibration
+/// strength, whether the pages are dark, how long the screen stays on, and
+/// the rate the panel runs at. They survive a reboot, which the recovery's
+/// own files do not.
+const SETTINGS: Range<u64> = 4 * 1024..4 * 1024 + 64;
+const SETTINGS_MAGIC: [u8; 4] = *b"SWRS";
+/// The layout version: 1 is brightness and vibration alone, 2 adds how
+/// long the screen stays on, and 3 the panel's rate. A run of an older
+/// build leaves what it does not know unset.
+const SETTINGS_VERSION: u32 = 3;
+
 /// The filesystems a request may have the data partition formatted as, the
 /// two Android's own recovery formats it as.
 pub const REFORMATS: [&str; 2] = ["ext4", "f2fs"];
@@ -26,6 +38,92 @@ pub const REFORMATS: [&str; 2] = ["ext4", "f2fs"];
 /// The misc partition, shared by the bootloader, Android and recovery.
 pub fn misc() -> PathBuf {
     Path::new(skyward_block::BY_NAME).join("misc")
+}
+
+/// What the recovery remembers across a reboot: how bright the screen was,
+/// how strongly the motor tapped, whether the pages were dark, how long
+/// the screen stays on before it goes dark, and how fast the panel runs.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Settings {
+    pub brightness: f32,
+    pub vibration: f32,
+    pub dark: bool,
+    /// The screen-off choice; `None` when the last run did not record one.
+    pub screen_off: Option<u32>,
+    /// The panel's refresh rate in hertz; `None` when the last run did not
+    /// record one.
+    pub refresh_rate: Option<u32>,
+}
+
+impl Settings {
+    /// Laid out as magic, version, the two shares, the dark flag, the
+    /// screen-off choice and whether it is set, the panel's rate and
+    /// whether it is set, then a sum over what precedes, all little-endian.
+    fn lay(&self) -> [u8; 64] {
+        let mut raw = [0u8; 64];
+        raw[0..4].copy_from_slice(&SETTINGS_MAGIC);
+        raw[4..8].copy_from_slice(&SETTINGS_VERSION.to_le_bytes());
+        raw[8..12].copy_from_slice(&self.brightness.to_le_bytes());
+        raw[12..16].copy_from_slice(&self.vibration.to_le_bytes());
+        raw[16] = self.dark as u8;
+        let (known, choice) = match self.screen_off {
+            Some(choice) => (1u8, choice),
+            None => (0u8, 0),
+        };
+        raw[17] = known;
+        raw[20..24].copy_from_slice(&choice.to_le_bytes());
+        let (rate_known, rate) = match self.refresh_rate {
+            Some(rate) => (1u8, rate),
+            None => (0u8, 0),
+        };
+        raw[18] = rate_known;
+        raw[24..28].copy_from_slice(&rate.to_le_bytes());
+        let sum: u32 = raw[..60].iter().map(|&b| b as u32).sum();
+        raw[60..64].copy_from_slice(&sum.to_le_bytes());
+        raw
+    }
+}
+
+/// The settings the last run left in misc, or none: never written, written
+/// by another program, or written with a share no slider gives.
+pub fn read_settings(misc: &Path) -> Option<Settings> {
+    let raw = raw_settings(misc)?;
+    let brightness = f32::from_le_bytes(raw[8..12].try_into().ok()?);
+    let vibration = f32::from_le_bytes(raw[12..16].try_into().ok()?);
+    if !(0.0..=1.0).contains(&brightness) || !(0.0..=1.0).contains(&vibration) {
+        return None;
+    }
+    // An older run laid the settings out without what this build reads
+    // after, in a version it still takes.
+    let screen_off = (raw[17] != 0).then(|| u32::from_le_bytes([raw[20], raw[21], raw[22], raw[23]]));
+    let refresh_rate = (raw[18] != 0).then(|| u32::from_le_bytes([raw[24], raw[25], raw[26], raw[27]]));
+    Some(Settings { brightness, vibration, dark: raw[16] != 0, screen_off, refresh_rate })
+}
+
+/// The misced bytes of the settings, once their magic and sum hold.
+fn raw_settings(misc: &Path) -> Option<[u8; 64]> {
+    let raw = read_at(misc, SETTINGS).ok()?;
+    if raw[0..4] != SETTINGS_MAGIC {
+        return None;
+    }
+    let sum: u32 = raw[..60].iter().map(|&b| b as u32).sum();
+    if u32::from_le_bytes(raw[60..64].try_into().ok()?) != sum {
+        return None;
+    }
+    let version = u32::from_le_bytes(raw[4..8].try_into().ok()?);
+    (version <= SETTINGS_VERSION).then_some(raw)
+}
+
+/// Leave the settings in misc for the next run to read.
+pub fn write_settings(misc: &Path, settings: &Settings) -> Result<()> {
+    let f = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(misc)
+        .with_context(|| format!("open {}", misc.display()))?;
+    f.write_all_at(&settings.lay(), SETTINGS.start)
+        .with_context(|| format!("write the settings to {}", misc.display()))?;
+    f.sync_all().with_context(|| format!("sync {}", misc.display()))
 }
 
 /// What the bootloader control block asks for: the command the bootloader
@@ -272,6 +370,15 @@ impl Work {
 fn text(field: &[u8]) -> Result<&str> {
     let end = field.iter().position(|&b| b == 0).unwrap_or(field.len());
     std::str::from_utf8(&field[..end]).context("not UTF-8")
+}
+
+/// The bytes read from misc at the given offset, or why they could not be.
+fn read_at(misc: &Path, at: Range<u64>) -> Result<[u8; 64]> {
+    let mut raw = [0u8; 64];
+    File::open(misc)
+        .and_then(|f| f.read_exact_at(&mut raw, at.start))
+        .with_context(|| format!("read {} at {}", misc.display(), at.start))?;
+    Ok(raw)
 }
 
 pub fn read(misc: &Path) -> Result<Bcb> {
