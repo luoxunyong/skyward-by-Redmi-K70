@@ -1064,6 +1064,49 @@ fn pace_line(c: &mut Canvas, cx: &Ctx, y: f32) -> f32 {
 /// What the install script showed, where there is any: its heading with how
 /// far it says it is, and under it the lines as the page's long list, the
 /// last thing on the page.
+/// The strip held at the bottom while an install script runs: the bar, and
+/// under it the rate it moves on at. The page is laid out with its height
+/// kept off the end, so the script's own output scrolls above it and no
+/// line of it stays hidden under the strip.
+fn script_dock(cx: &Ctx, stage: Option<&Stage>) -> Dock {
+    let (t, f, l) = (cx.t, cx.f, cx.state.lang);
+    let m = &t.m;
+    let rate = cx.state.pace.rate().map(fmt::pace);
+    let share = match stage {
+        Some(Stage::Script { thousandths, .. }) => Some(f32::from(*thousandths) / 1000.0),
+        _ => None,
+    };
+    let said = match (&rate, cx.state.pace.elapsed()) {
+        (Some(rate), at) => tr!(l, "速度 {rate}/s · 已用时 {at} 秒", "速度 {rate}/s · 已耗時 {at} 秒", "{rate}/s · {at} s"),
+        (None, at) => tr!(l, "已用时 {at} 秒", "已耗時 {at} 秒", "{at} s"),
+    };
+    let h = m.dp(DOCK_H) as u32;
+    let mut c = Canvas::unfilled(m.w, h, 0..h);
+    c.clear(t.pal.bg);
+    let pad = m.dp(DOCK_PAD);
+    let line_y = pad + t.m.dp(11.0);
+    c.text_vc(&f.body, &said, m.margin, line_y, m.sub_px, t.pal.info, None);
+    if let Some(share) = share {
+        widgets::progress_bar(&mut c, t, m.margin, pad + m.dp(24.0), m.w as f32 - m.margin * 2.0, share);
+    } else {
+        // A step whose end is not known shows a bar that runs on its own,
+        // so the strip still says the work has not stopped.
+        let x = m.margin;
+        let w = m.w as f32 - m.margin * 2.0;
+        let y = pad + m.dp(24.0);
+        c.fill_round_rect(x, y, w, m.dp(6.0), m.dp(3.0), t.pal.track);
+        let span = (w * 0.3).max(m.dp(24.0));
+        let travelled = cx.state.pace.elapsed() as f32 * 0.25 % (w - span).max(1.0);
+        c.fill_round_rect(x + travelled, y, span, m.dp(6.0), m.dp(3.0), t.pal.accent);
+    }
+    Dock { canvas: c, hits: Vec::new() }
+}
+
+/// How tall the strip at the bottom of the installing page is, in dp, and
+/// how far its words stand from its top.
+const DOCK_H: f32 = 44.0;
+const DOCK_PAD: f32 = 8.0;
+
 /// What the install script showed, where there is any: its heading, and
 /// under it the lines as the page's long list, the last thing on the page.
 fn script_output(c: &mut Canvas, cx: &Ctx, y: f32, rows: &mut Option<Rows>) -> f32 {
@@ -1111,6 +1154,7 @@ pub fn installing(cx: &Ctx) -> Frame {
     let (t, f, s, i, l) = (cx.t, cx.f, cx.state, cx.info, cx.state.lang);
     let mut c = long_page(cx);
     let (mut out, mut rows) = (Vec::new(), None);
+    let mut dock: Option<Dock> = None;
     let top = t.m.content_top;
     let computer = s.source == Source::Computer;
     let bottom = match &s.install {
@@ -1366,6 +1410,11 @@ pub fn installing(cx: &Ctx) -> Frame {
             // How fast it moves on and how long it has left, over the
             // script's own output, which keeps its room below.
             let y = pace_line(&mut c, cx, y);
+            // The bar and the rate, held at the bottom of the screen where
+            // the script's output scrolls under them: the page is laid out
+            // with the strip's height kept off its end, so no line of the
+            // output stays under it.
+            dock = Some(script_dock(cx, stage.as_ref()));
             script_output(&mut c, cx, y, &mut rows)
         }
         Install::Wiping => {
@@ -1392,7 +1441,7 @@ pub fn installing(cx: &Ctx) -> Frame {
         (Source::Asked { .. }, Some(reason)) => widgets::info_card(&mut c, t, f, bottom + t.m.dp(12.0), &[(l.pick(REASON), reason.clone())]),
         _ => bottom,
     };
-    Frame { rows, ..Frame::new(t, fit(c, t, bottom), out, install_title(l, s.source), top) }
+    Frame { rows, dock, ..Frame::new(t, fit(c, t, bottom), out, install_title(l, s.source), top) }
 }
 
 /// What a request the system made gives as why.
@@ -2946,7 +2995,7 @@ pub fn wlan_password(cx: &Ctx) -> Frame {
     let show = widgets::list(&mut c, t, f, y + t.m.card_gap, &[Row::new(l.pick(SHOW_PASSWORD)).trail(Trail::Switch(s.show_password))]);
     out.extend(hits(&show.rows, &[Action::Toggle(Switch::ShowPassword)]));
     keyboard_hits(&mut c, t, f, s, l.pick(CONNECT_KEY), &mut out);
-    Frame { caret: Some(caret), ..Frame::new(t, c, out, l.pick(["输入密码", "輸入密碼", "Enter password"]), top) }
+    Frame { caret: Some(caret), frozen: true, ..Frame::new(t, c, out, l.pick(["输入密码", "輸入密碼", "Enter password"]), top) }
 }
 
 /// A network added by hand: its name, how it is protected, its password
@@ -3396,7 +3445,7 @@ pub fn terminal(cx: &Ctx) -> Frame {
     let held = cx.term.is_some_and(|term| term.ctrl);
     let keys = term::keys(&mut c, t, f, &l, &term::TERM_KEYS, held);
     out.extend(keys.into_iter().map(|(rect, key)| Hit { rect, action: Action::TermKey(key) }));
-    Frame { scrollback: Some((l.card, l.pitch)), ..Frame::new(t, c, out, s.lang.pick(TERMINAL), top) }
+    Frame { scrollback: Some((l.card, l.pitch)), frozen: true, ..Frame::new(t, c, out, s.lang.pick(TERMINAL), top) }
 }
 
 /// A text file being edited: where it is, its lines wrapped on a card, the

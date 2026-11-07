@@ -1029,6 +1029,14 @@ pub enum Install {
     Ending,
 }
 
+impl Install {
+    /// Whether a step of the install is under way, and the time it takes
+    /// has to pass on the page even where nothing of it comes in.
+    pub fn is_under_way(&self) -> bool {
+        matches!(self, Install::Updating { .. } | Install::Flashing { .. } | Install::Scripting { .. })
+    }
+}
+
 /// What a failed install may have left broken.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Damage {
@@ -1318,6 +1326,10 @@ pub struct Frame {
     /// A strip held at the bottom of the screen over the page; the page
     /// scrolls far enough for nothing to stay under it.
     pub dock: Option<Dock>,
+    /// A page that does not scroll at all: what it shows fits the screen,
+    /// and dragging it moves nothing, as a page with a keyboard over it
+    /// does.
+    pub frozen: bool,
     /// A text field's blinking cursor, in page coordinates.
     pub caret: Option<widgets::Caret>,
     /// The round button at the right end of the bar: what it shows, and
@@ -1482,6 +1494,7 @@ impl Frame {
             fold: None,
             scrollback: None,
             dock: None,
+            frozen: false,
             caret: None,
             button: None,
         }
@@ -1641,6 +1654,15 @@ impl Pace {
     /// but not how much more it has to do.
     pub fn sized(&self) -> bool {
         self.total > 0
+    }
+
+    /// Let the time the step has been at its work pass to `now`, for what
+    /// comes in less often than the page is drawn: what it has done stands
+    /// where it stood, and how long it has been at it moves on.
+    pub fn still_going(&mut self, now: u64) {
+        if let Some(started) = self.started {
+            self.elapsed = now.saturating_sub(started);
+        }
     }
 
     /// How many seconds the step has been at it.
@@ -2944,6 +2966,13 @@ impl App {
     /// deadline goes away.
     pub fn tick(&mut self, now: u64) -> Vec<Effect> {
         let mut fx = Vec::new();
+        // The time a step has been at its work passes even where nothing of
+        // the work has come in since: a script that reads and writes a
+        // partition for a minute says nothing of it meanwhile, and the page
+        // would stand still.
+        if self.state.install.is_under_way() {
+            self.state.pace.still_going(now);
+        }
         // The key waiting for its partner in a screenshot, left alone long
         // enough, does what it does alone.
         if self.chord.is_some_and(|(_, at)| now >= at + CHORD_MS) {
@@ -4140,6 +4169,11 @@ impl App {
     }
 
     fn max_scroll(&self) -> f32 {
+        // A page that does not scroll has nowhere to go, however tall what
+        // it holds came out.
+        if self.frame.as_ref().is_some_and(|fr| fr.frozen) {
+            return 0.0;
+        }
         (self.height - self.h as f32).max(0.0)
     }
 
@@ -4879,6 +4913,9 @@ impl App {
             self.wake(now);
         }
         let install = &mut self.state.install;
+        // Whether the page goes to the bottom of the script's output after
+        // this event, or back to its top.
+        let mut follow: Option<bool> = None;
         match ev {
             Event::Waiting => *install = Install::Waiting,
             Event::Checking { size } => *install = Install::Checking { size, stage: None },
@@ -4896,6 +4933,9 @@ impl App {
             Event::Running => {
                 *install = Install::Scripting { stage: None, running: true };
                 self.state.script_output.clear();
+                // The page follows the output from its first line, and is
+                // brought back to the top once the script is done.
+                follow = Some(true);
             }
             Event::Print(line) => {
                 let shown = &mut self.state.script_output;
@@ -4903,6 +4943,8 @@ impl App {
                     shown.remove(0);
                 }
                 shown.push(line);
+                // A line more to show, so the page goes down to it.
+                follow = Some(true);
             }
             Event::Progress(stage) => {
                 // How fast the step moves on, for the time it has left: read
@@ -4929,7 +4971,20 @@ impl App {
                     _ => None,
                 };
                 *install = Install::Finished { outcome, damage };
+                // The script is done: the page goes back to the top, where
+                // what it came to is said.
+                follow = Some(false);
             }
+        }
+        // The page follows the script's output as it comes, and goes back
+        // to its top once the script is done; a drag of the page calls it
+        // off, so what was scrolled to stays where it was put. What is
+        // followed is the end of the page as it now stands, which the next
+        // draw settles against the page's own height again.
+        if let Some(down) = follow.take() {
+            let max = self.max_scroll();
+            let (_, scroll, _) = self.top_mut();
+            *scroll = if down { max } else { 0.0 };
         }
         if self.screen() == Screen::Installing {
             self.refresh();

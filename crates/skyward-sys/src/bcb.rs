@@ -21,15 +21,15 @@ const WIPE_PACKAGE: Range<u64> = 16 * 1024..32 * 1024;
 
 /// The recovery's own remembered settings, in misc' free space between
 /// the bootloader message and the wipe package: brightness, the vibration
-/// strength, whether the pages are dark, how long the screen stays on, and
-/// the rate the panel runs at. They survive a reboot, which the recovery's
-/// own files do not.
+/// strength, whether the pages are dark, how long the screen stays on, the
+/// rate the panel runs at, and whether the clock runs on 24 hours. They
+/// survive a reboot, which the recovery's own files do not.
 const SETTINGS: Range<u64> = 4 * 1024..4 * 1024 + 64;
 const SETTINGS_MAGIC: [u8; 4] = *b"SWRS";
 /// The layout version: 1 is brightness and vibration alone, 2 adds how
-/// long the screen stays on, and 3 the panel's rate. A run of an older
-/// build leaves what it does not know unset.
-const SETTINGS_VERSION: u32 = 3;
+/// long the screen stays on, 3 the panel's rate, and 4 the clock's form. A
+/// run of an older build leaves what it does not know unset.
+const SETTINGS_VERSION: u32 = 4;
 
 /// The filesystems a request may have the data partition formatted as, the
 /// two Android's own recovery formats it as.
@@ -42,7 +42,8 @@ pub fn misc() -> PathBuf {
 
 /// What the recovery remembers across a reboot: how bright the screen was,
 /// how strongly the motor tapped, whether the pages were dark, how long
-/// the screen stays on before it goes dark, and how fast the panel runs.
+/// the screen stays on before it goes dark, how fast the panel runs, and
+/// whether the clock runs on 24 hours.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Settings {
     pub brightness: f32,
@@ -53,12 +54,16 @@ pub struct Settings {
     /// The panel's refresh rate in hertz; `None` when the last run did not
     /// record one.
     pub refresh_rate: Option<u32>,
+    /// Whether the clock runs on 24 hours; `None` when the last run did not
+    /// record it, so the installed system's own habit stands.
+    pub hour24: Option<bool>,
 }
 
 impl Settings {
     /// Laid out as magic, version, the two shares, the dark flag, the
     /// screen-off choice and whether it is set, the panel's rate and
-    /// whether it is set, then a sum over what precedes, all little-endian.
+    /// whether it is set, the clock's form and whether it is set, then a
+    /// sum over what precedes, all little-endian.
     fn lay(&self) -> [u8; 64] {
         let mut raw = [0u8; 64];
         raw[0..4].copy_from_slice(&SETTINGS_MAGIC);
@@ -78,6 +83,12 @@ impl Settings {
         };
         raw[18] = rate_known;
         raw[24..28].copy_from_slice(&rate.to_le_bytes());
+        let (hours_known, hours) = match self.hour24 {
+            Some(on) => (1u8, on as u8),
+            None => (0u8, 0),
+        };
+        raw[19] = hours_known;
+        raw[28] = hours;
         let sum: u32 = raw[..60].iter().map(|&b| b as u32).sum();
         raw[60..64].copy_from_slice(&sum.to_le_bytes());
         raw
@@ -97,7 +108,8 @@ pub fn read_settings(misc: &Path) -> Option<Settings> {
     // after, in a version it still takes.
     let screen_off = (raw[17] != 0).then(|| u32::from_le_bytes([raw[20], raw[21], raw[22], raw[23]]));
     let refresh_rate = (raw[18] != 0).then(|| u32::from_le_bytes([raw[24], raw[25], raw[26], raw[27]]));
-    Some(Settings { brightness, vibration, dark: raw[16] != 0, screen_off, refresh_rate })
+    let hour24 = (raw[19] != 0).then(|| raw[28] != 0);
+    Some(Settings { brightness, vibration, dark: raw[16] != 0, screen_off, refresh_rate, hour24 })
 }
 
 /// The misced bytes of the settings, once their magic and sum hold.

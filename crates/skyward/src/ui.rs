@@ -963,6 +963,7 @@ fn settings_of(app: &App) -> skyward_sys::bcb::Settings {
         dark: app.state.dark,
         screen_off: u32::try_from(app.state.screen_off).ok(),
         refresh_rate: skyward_ui::app::REFRESH_RATES.get(app.state.refresh_rate).copied(),
+        hour24: Some(app.state.hour24),
     }
 }
 
