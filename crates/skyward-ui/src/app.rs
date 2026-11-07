@@ -1617,8 +1617,11 @@ impl Pace {
 
     /// How many seconds the step has left, from the rate it moves at now and
     /// the bytes still to come; `None` where no rate is known yet.
+    ///
+    /// The rate is taken to the whole number the page shows first, so the
+    /// seconds left and the rate told beside them are of the same reading.
     pub fn left(&self) -> Option<u64> {
-        let rate = self.rate()?;
+        let rate = crate::fmt::pace_bytes_per_second(self.rate()?);
         let left = self.total.saturating_sub(self.done) as f64;
         (rate > 0.0).then(|| (left / rate).ceil() as u64)
     }
@@ -9102,6 +9105,45 @@ mod tests {
         assert_eq!((app.screen(), &app.state.install), (Screen::Install, &Install::Ending));
         app.install(Event::Finished(Outcome::Cancelled), 2000);
         assert_eq!(app.state.install, Install::Idle);
+    }
+
+    #[test]
+    fn a_steps_rate_settles_and_the_time_it_has_left_is_worked_out_from_it() {
+        let mut pace = Pace::default();
+        // A megabyte a second, ten of them to write.
+        for at in 0..=10u64 {
+            pace.at(at * 1_000_000, 10_000_000, at * 1000);
+        }
+        assert!(pace.known());
+        assert_eq!(pace.elapsed(), 10);
+        let rate = pace.rate().expect("a rate from two samples");
+        assert!((rate - 1_000_000.0).abs() < 1.0, "a megabyte a second: {rate}");
+        assert_eq!(pace.left(), Some(0), "nothing left once all ten are written");
+
+        // Half of them written in five seconds: five to go at that rate.
+        let mut pace = Pace::default();
+        for at in 0..=5u64 {
+            pace.at(at * 1_000_000, 10_000_000, at * 1000);
+        }
+        assert_eq!(pace.left(), Some(5));
+
+        // A step whose size is not known yet says nothing.
+        let mut pace = Pace::default();
+        pace.at(1000, 0, 1000);
+        assert!(!pace.known());
+        assert_eq!(pace.left(), None);
+    }
+
+    #[test]
+    fn a_step_that_starts_again_starts_its_rate_and_its_time_over() {
+        let mut pace = Pace::default();
+        for at in 0..=4u64 {
+            pace.at(at * 1_000_000, 10_000_000, at * 1000);
+        }
+        // Another step, twice the size: what came before says nothing of it.
+        pace.at(0, 20_000_000, 5000);
+        assert_eq!(pace.elapsed(), 0);
+        assert_eq!(pace.overall(), None, "nothing written yet");
     }
 
     #[test]

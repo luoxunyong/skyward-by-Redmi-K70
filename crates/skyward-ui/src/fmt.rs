@@ -790,20 +790,39 @@ pub fn file_size(bytes: u64) -> String {
 }
 
 /// How fast bytes move, `bytes` of them a second, as the install page tells
-/// it: `86.4 MB`, in steps of 1000.
+/// it: `86 MB`, in steps of 1000, the whole number the estimation was made
+/// with. A rate read from a running step moves about from sample to sample,
+/// so the tenths it would carry are the noise it was smoothed to take out.
 pub fn pace(bytes: f64) -> String {
+    let (rounded, unit) = pace_parts(bytes);
+    format!("{rounded} {unit}")
+}
+
+/// The whole number `bytes` a second comes to, and the unit it is told in:
+/// what the page shows and what the time left is worked out from, so the
+/// two agree.
+pub fn pace_parts(bytes: f64) -> (u64, &'static str) {
     const UNITS: [&str; 4] = ["B", "KB", "MB", "GB"];
     let (mut v, mut unit) = (bytes.max(0.0), 0);
     while v > 900.0 && unit < UNITS.len() - 1 {
         v /= 1000.0;
         unit += 1;
     }
-    let tenths = (v * 10.0).round() as u64;
-    let n = match tenths % 10 {
-        0 => format!("{v:.0}"),
-        _ => format!("{v:.1}"),
+    (v.round() as u64, UNITS[unit])
+}
+
+/// How fast a step of an install moves on, in whole bytes a second, as what
+/// the page shows: the tenths a rate carries are noise, and the time left is
+/// worked out from this so the two agree.
+pub fn pace_bytes_per_second(bytes: f64) -> f64 {
+    let (rounded, unit) = pace_parts(bytes);
+    let scale = match unit {
+        "B" => 1.0,
+        "KB" => 1e3,
+        "MB" => 1e6,
+        _ => 1e9,
     };
-    format!("{n} {}", UNITS[unit])
+    rounded as f64 * scale
 }
 
 /// A Unix time in the zone at `zone` in [`TIME_ZONES`], to the minute:
@@ -1746,6 +1765,19 @@ mod tests {
         assert_eq!(file_size(634_960), "634.96 KB");
         assert_eq!(file_size(2_000_000_000), "2 GB");
         assert_eq!(file_size(1_500_000), "1.5 MB");
+    }
+
+    #[test]
+    fn a_rate_is_told_in_whole_numbers() {
+        assert_eq!(pace(86_400_000.0), "86 MB");
+        assert_eq!(pace(86_400.0), "86 KB");
+        assert_eq!(pace(1_500_000_000.0), "2 GB", "rounded, not cut short");
+        assert_eq!(pace(0.0), "0 B");
+        // What the time left is worked out from is the same whole number,
+        // so the two readings never disagree.
+        assert_eq!(pace_bytes_per_second(86_400_000.0), 86_000_000.0);
+        assert_eq!(pace_bytes_per_second(1_500_000_000.0), 2_000_000_000.0);
+        assert_eq!(pace_bytes_per_second(1_700.0), 2_000.0);
     }
 
     #[test]
