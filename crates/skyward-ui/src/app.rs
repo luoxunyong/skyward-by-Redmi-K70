@@ -1529,16 +1529,15 @@ impl Frame {
 }
 
 /// How far a step is and how far it has to go, in what the step counts in:
-/// bytes for the steps that read or write them, and thousandths of the
-/// script's own reckoning for one that runs, so a step whose size is not
-/// known still moves on at a rate.
+/// bytes for the steps that read or write them, and for a script the bytes
+/// of the package it has had read.
 fn stage_bytes(stage: &Stage) -> (u64, u64) {
     match stage {
         Stage::Writing { done, total } | Stage::Flashing { done, total } | Stage::Reflashing { done, total } | Stage::Signature { done, total } => {
             (*done, *total)
         }
         Stage::Verifying { index, count, .. } => (*index as u64, *count as u64),
-        Stage::Script { thousandths } => (u64::from(*thousandths), 1000),
+        Stage::Script { done, total, .. } => (*done, *total),
         Stage::Finishing => (0, 0),
     }
 }
@@ -9003,8 +9002,11 @@ mod tests {
         for line in ["- Flashing boot", " ", "- Done"] {
             app.install(Event::Print(line.into()), 1000);
         }
-        app.install(Event::Progress(Stage::Script { thousandths: 500 }), 1000);
-        assert_eq!(app.state.install, Install::Scripting { stage: Some(Stage::Script { thousandths: 500 }), running: true });
+        app.install(Event::Progress(Stage::Script { thousandths: 500, done: 1 << 20, total: 2 << 20 }), 1000);
+        assert_eq!(
+            app.state.install,
+            Install::Scripting { stage: Some(Stage::Script { thousandths: 500, done: 1 << 20, total: 2 << 20 }), running: true }
+        );
         let fr = app.frame(&f, &i);
         assert!(fr.hits.is_empty(), "nothing on the page to tap while the script runs");
         assert_eq!(fr.rows.as_ref().map(Rows::count), Some(3), "a row to each line it showed");

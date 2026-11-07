@@ -981,7 +981,8 @@ fn run_binary(ctx: &Context, size: u64, served: &impl Fn() -> u64) -> Result<(i3
         if let Some(now) = thousandths(&bar, served()).filter(|&now| shown != Some(now) && told.elapsed() >= PROGRESS_EVERY) {
             shown = Some(now);
             told = Instant::now();
-            ctx.send(Event::Progress(Stage::Script { thousandths: now }));
+            let read = served();
+            ctx.send(Event::Progress(Stage::Script { thousandths: now, done: read.min(size), total: size }));
         }
         if ended.is_none() {
             ended = child.try_wait().context("see whether the install script has ended")?.map(|status| (status, Instant::now()));
@@ -1000,7 +1001,7 @@ fn run_binary(ctx: &Context, size: u64, served: &impl Fn() -> u64) -> Result<(i3
     // Where the script got last, which telling the screen at most so often
     // may have held back.
     if let Some(last) = thousandths(&bar, served()).filter(|&last| shown != Some(last)) {
-        ctx.send(Event::Progress(Stage::Script { thousandths: last }));
+        ctx.send(Event::Progress(Stage::Script { thousandths: last, done: served().min(size), total: size }));
     }
     let status = match ended {
         Some((status, _)) => status,

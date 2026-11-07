@@ -141,8 +141,10 @@ pub enum Stage {
     Finishing,
     /// An image is written and read back: bytes so far, of all.
     Flashing { done: u64, total: u64 },
-    /// The install script runs, as far as it says it is, in thousandths.
-    Script { thousandths: u16 },
+    /// The install script runs, as far as it says it is, in thousandths,
+    /// and the bytes of the package read so far of all of them, which is
+    /// what a script that names no progress of its own moves on by.
+    Script { thousandths: u16, done: u64, total: u64 },
     /// The zip's signature is checked: bytes read so far of what it is a
     /// signature of, and of all of that.
     Signature { done: u64, total: u64 },

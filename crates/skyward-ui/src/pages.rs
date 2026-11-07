@@ -997,7 +997,7 @@ fn script_stage<'a>(l: Lang, stage: Option<&Stage>, said: &'a [String]) -> (&'a 
     let last = said.iter().rev().map(|line| line.trim()).find(|line| !line.is_empty()).unwrap_or(running);
     match stage {
         Some(Stage::Reflashing { done, total }) => (l.pick(REFLASHING), Some(*done as f32 / *total as f32)),
-        Some(Stage::Script { thousandths }) => (last, Some(f32::from(*thousandths) / 1000.0)),
+        Some(Stage::Script { thousandths, .. }) => (last, Some(f32::from(*thousandths) / 1000.0)),
         _ => (last, None),
     }
 }
@@ -1069,7 +1069,7 @@ fn script_output(c: &mut Canvas, cx: &Ctx, y: f32, rows: &mut Option<Rows>) -> f
     // How far the script says it is, as it says it: a thousandth at a time,
     // which its own progress line gives where it writes one.
     let heading = match install_stage(&cx.state.install) {
-        Some(Stage::Script { thousandths }) => {
+        Some(Stage::Script { thousandths, .. }) => {
             let p = (*thousandths as f32 / 10.0).round() as u32;
             format!("{said} · {p}%")
         }
@@ -3835,7 +3835,7 @@ mod tests {
         let l = Lang::Hans;
         assert_eq!(script_stage(l, None, &[]), ("正在运行安装脚本", None));
         assert_eq!(script_stage(Lang::En, None, &[]), ("Running the install script", None));
-        assert_eq!(script_stage(l, Some(&Stage::Script { thousandths: 250 }), &said), ("- Flashing boot", Some(0.25)), "past a blank line");
+        assert_eq!(script_stage(l, Some(&Stage::Script { thousandths: 250, done: 1, total: 4 }), &said), ("- Flashing boot", Some(0.25)), "past a blank line");
         assert_eq!(script_stage(l, Some(&Stage::Reflashing { done: 1, total: 4 }), &said), ("正在重新刷入 Skyward", Some(0.25)));
         assert_eq!(update_stage(Lang::En, Some(&Stage::Reflashing { done: 3, total: 4 })), ("Flashing Skyward again".to_string(), Some(0.75)));
         assert_eq!(update_stage(Lang::Hant, Some(&Stage::Writing { done: 1, total: 4 })).0, "第 1 步，共 3 步：寫入新系統 25%");

@@ -413,7 +413,7 @@ fn main() -> Result<()> {
             app.state.script_output.clear();
         }),
         ("20-install-script-running-dark", Screen::Installing, true, &|app| {
-            script(app, Install::Scripting { stage: Some(Stage::Script { thousandths: 420 }), running: true }, false);
+            script(app, Install::Scripting { stage: Some(Stage::Script { thousandths: 420, done: 3_200_000_000, total: 6_993_065_856 }), running: true }, false);
             app.state.script_output.truncate(9);
         }),
         ("20-install-script-ran", Screen::Installing, false, &|app| {
