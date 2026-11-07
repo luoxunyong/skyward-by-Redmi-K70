@@ -1716,9 +1716,15 @@ pub struct State {
     /// Whether the clock and the times on the pages run on a 24-hour clock,
     /// as the phone's own settings say; off for a 12-hour one with AM or PM.
     pub hour24: bool,
+    /// The clock's form was chosen on the settings page, now or at an
+    /// earlier start, where otherwise the installed system's own is taken.
+    pub hour_chosen: bool,
     /// The refresh rate the panel is driven at, by its place in
     /// [`REFRESH_RATES`].
     pub refresh_rate: usize,
+    /// The panel's rate was chosen on the refresh rate page, now or at an
+    /// earlier start, where otherwise the installed system's own is taken.
+    pub rate_chosen: bool,
     /// The time zone the clock and the times on the pages keep, by its
     /// place in [`TIME_ZONES`].
     pub time_zone: usize,
@@ -1883,7 +1889,9 @@ impl Default for State {
             // Two minutes.
             screen_off: 3,
             hour24: true,
+            hour_chosen: false,
             refresh_rate: REFRESH_RATES.len() - 1,
+            rate_chosen: false,
             time_zone: 0,
             vibrate: true,
             vibration: SLIDER_START,
@@ -5296,6 +5304,8 @@ impl App {
             }
             Action::RefreshRate(k) => {
                 self.state.refresh_rate = k;
+                // Chosen here, it stands over the installed system's own.
+                self.state.rate_chosen = true;
                 self.refresh();
             }
             Action::TimeZone(k) => {
@@ -5304,6 +5314,8 @@ impl App {
             }
             Action::Hour24(on) => {
                 self.state.hour24 = on;
+                // Chosen here, it stands over the installed system's own.
+                self.state.hour_chosen = true;
                 self.refresh();
             }
             Action::Language(l) => {

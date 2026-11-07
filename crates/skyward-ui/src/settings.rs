@@ -5,7 +5,7 @@
 //! a time zone, a part or a place by its name, so a later version that lists
 //! them otherwise reads them the same.
 
-use crate::app::{Place, State, SCREEN_OFF, TIME_ZONES};
+use crate::app::{Place, State, REFRESH_RATES, SCREEN_OFF, TIME_ZONES};
 use crate::Lang;
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
@@ -42,6 +42,14 @@ pub struct Settings {
     /// How long the screen stays on with nothing touched, in seconds; 0
     /// keeps it on.
     pub screen_off: u64,
+    /// Whether the clock runs on 24 hours, where it was chosen on the
+    /// settings page; none while the installed system's own form stands.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub hour24: Option<bool>,
+    /// The panel's rate in hertz, where it was chosen on the refresh rate
+    /// page; none while the installed system's own rate stands.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub refresh_rate: Option<u32>,
     /// The time zone, by its name in the tz database.
     pub time_zone: String,
     pub vibrate: bool,
@@ -122,6 +130,8 @@ impl Settings {
             dark: state.dark,
             brightness: state.brightness,
             screen_off: SCREEN_OFF[state.screen_off].map_or(0, |ms| ms / 1000),
+            hour24: state.hour_chosen.then_some(state.hour24),
+            refresh_rate: state.rate_chosen.then(|| REFRESH_RATES[state.refresh_rate]),
             time_zone: TIME_ZONES[state.time_zone].2.to_string(),
             vibrate: state.vibrate,
             vibration: state.vibration,
@@ -178,6 +188,16 @@ impl Settings {
         }
         if let Some(at) = TIME_ZONES.iter().position(|zone| zone.2 == self.time_zone) {
             state.time_zone = at;
+        }
+        if let Some(on) = self.hour24 {
+            state.hour24 = on;
+            state.hour_chosen = true;
+        }
+        if let Some(hz) = self.refresh_rate {
+            if let Some(at) = REFRESH_RATES.iter().position(|&rate| rate == hz) {
+                state.refresh_rate = at;
+                state.rate_chosen = true;
+            }
         }
         state.vibrate = self.vibrate;
         if (0.0..=1.0).contains(&self.vibration) {

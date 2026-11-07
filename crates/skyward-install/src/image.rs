@@ -163,7 +163,8 @@ pub fn device_config<R: Read + Seek>(file: &mut R) -> Result<Option<Vec<u8>>> {
     }
     let header = match Header::parse(&mut Cursor::new(&head)) {
         Ok(header) => header,
-        Err(_) => return Ok(false),
+        // A header that does not read is no Skyward recovery's.
+        Err(_) => return Ok(None),
     };
     if header.ramdisk_size() == 0 {
         return Ok(None);
@@ -174,18 +175,18 @@ pub fn device_config<R: Read + Seek>(file: &mut R) -> Result<Option<Vec<u8>>> {
     if ![LZ4_LEGACY, LZ4_FRAME, GZIP, NEWC].iter().any(|magic| start.starts_with(magic)) {
         return Ok(None);
     }
-<<<<<<< HEAD
     let read = |entry: &mut dyn Read| {
         let mut config = Vec::new();
         entry.read_to_end(&mut config).context("read the device configuration")?;
         Ok(config)
     };
-    find(ramdisk, |name| name == skyward_config::ramdisk::CONFIG, read).context("read the ramdisk")
-=======
-    // A ramdisk packed as a newc archive that does not read to its end is
-    // another recovery's, not this one's.
-    Ok(holds(ramdisk, |name| name == skyward_config::ramdisk::CONFIG).unwrap_or(false))
->>>>>>> 869135a (vermeer: keep Skyward in both recovery slots, and remember the pages)
+    // A ramdisk that does not read to its end is another recovery's, not
+    // this one's: saying so puts this recovery back into it, where failing
+    // the whole answer would leave whatever is there in it for good.
+    match find(ramdisk, |name| name == skyward_config::ramdisk::CONFIG, read) {
+        Ok(found) => Ok(found),
+        Err(_) => Ok(None),
+    }
 }
 
 /// The partition `name` of `slot` among the links in `dir`.
