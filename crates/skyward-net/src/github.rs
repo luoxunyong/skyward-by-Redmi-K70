@@ -80,10 +80,18 @@ pub fn newest(answer: &str, codename: &str, running: &str) -> Result<Newest> {
     let version = tag.strip_prefix('v').with_context(|| format!("the newest release is tagged {tag}, which is not v and a version"))?;
     let newest = semver::Version::parse(version).with_context(|| format!("the newest release is tagged {tag}"))?;
     let this = semver::Version::parse(running).with_context(|| format!("this build's version is {running}"))?;
-    // Each zip is named skyward-, the tag, the phone's codename, and the
-    // stock build the image is made on.
-    let start = format!("skyward-{tag}-{codename}-");
-    let build = match release.assets.into_iter().find(|a| a.name.starts_with(&start) && a.name.ends_with(".zip")) {
+    // Each zip is named skyward-, the tag and the phone's codename, and
+    // then whatever its maker calls it: the stock build the image is made
+    // on, or nothing at all, which is what a release holding one phone's
+    // build alone is named. The name has to end there, so `vermeer` is not
+    // taken for `vermeerx`.
+    let start = format!("skyward-{tag}-{codename}");
+    let build = match release.assets.into_iter().find(|a| {
+        a.name
+            .strip_suffix(".zip")
+            .and_then(|stem| stem.strip_prefix(&start))
+            .is_some_and(|rest| rest.is_empty() || rest.starts_with('-'))
+    }) {
         None => None,
         Some(a) => {
             let sha256 = a.digest.as_deref().and_then(|d| d.strip_prefix("sha256:")).with_context(|| format!("GitHub gives no SHA-256 of {}", a.name))?;
@@ -169,6 +177,18 @@ mod tests {
             })
         );
         assert_eq!(newest(ANSWERED_013, "nezha", "0.1.2").unwrap().build.unwrap().size, 43145196);
+    }
+
+    #[test]
+    fn a_zip_need_not_name_the_stock_build_it_is_made_on() {
+        // A release carrying one phone's build alone is named with the tag
+        // and the phone, and nothing after them.
+        let plain = ANSWERED_013.replace("skyward-v0.1.3-ishtar-OS3.0.308.0.WMACNXM", "skyward-v0.1.3-ishtar");
+        let named = newest(&plain, "ishtar", "0.1.2").unwrap().build.expect("the phone's own build");
+        assert_eq!(named.name, "skyward-v0.1.3-ishtar.zip");
+        // A phone whose name begins with another's is not taken for it.
+        assert!(newest(ANSWERED_013, "ishta", "0.1.2").unwrap().build.is_none(), "`ishta` is not `ishtar`");
+        assert!(newest(ANSWERED_013, "ishtarx", "0.1.2").unwrap().build.is_none(), "nor is `ishtarx`");
     }
 
     #[test]
