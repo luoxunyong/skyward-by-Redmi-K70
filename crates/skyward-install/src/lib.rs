@@ -141,10 +141,12 @@ pub enum Stage {
     Finishing,
     /// An image is written and read back: bytes so far, of all.
     Flashing { done: u64, total: u64 },
-    /// The install script runs, as far as it says it is, in thousandths,
-    /// and the bytes of the package read so far of all of them, which is
-    /// what a script that names no progress of its own moves on by.
-    Script { thousandths: u16, done: u64, total: u64 },
+    /// The install script runs: as far as it says it is in thousandths,
+    /// where it says; the steps it has taken, counted from the lines it
+    /// writes as it goes; and how long it has been at it. A package that
+    /// names no progress of its own is shown by the steps it takes and the
+    /// time they took, which is all a recovery can tell of it.
+    Script { thousandths: u16, steps: u64, elapsed_ms: u64 },
     /// The zip's signature is checked: bytes read so far of what it is a
     /// signature of, and of all of that.
     Signature { done: u64, total: u64 },

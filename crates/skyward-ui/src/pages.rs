@@ -1034,23 +1034,28 @@ fn pace_line(c: &mut Canvas, cx: &Ctx, y: f32) -> f32 {
     if !pace.known() {
         return y;
     }
-    let (left, now, elapsed, overall) = (pace.left(), pace.rate(), pace.elapsed(), pace.overall());
-    // The seconds left only once a rate has settled: said from the start, a
-    // step whose rate is not known yet would give a number that jumps about.
-    let said = match (left, now, overall) {
+    // The rates as the page tells them, `86 MB`, not the bytes they were
+    // read as: a raw count of bytes a second tells nothing at a glance.
+    let now = pace.rate().map(fmt::pace);
+    let overall = pace.overall().map(fmt::pace);
+    let (left, elapsed) = (pace.left(), pace.elapsed());
+    let said = match (left, &now, &overall) {
         (Some(left), Some(now), Some(overall)) => tr!(
             l,
-            "距离刷写完成还要 {left} 秒，速度 {now}/s，已用时 {elapsed} 秒，平均 {overall}/s",
-            "距離刷寫完成還要 {left} 秒，速度 {now}/s，已耗時 {elapsed} 秒，平均 {overall}/s",
+            "距离完成还要 {left} 秒，速度 {now}/s，已用时 {elapsed} 秒，平均 {overall}/s",
+            "距離完成還要 {left} 秒，速度 {now}/s，已耗時 {elapsed} 秒，平均 {overall}/s",
             "{left} s left · {now}/s · {elapsed} s so far · {overall}/s on average"
         ),
-        (None, Some(now), None) => tr!(l, "正在刷写，速度 {now}/s", "正在刷寫，速度 {now}/s", "Writing at {now}/s"),
+        // A step whose end is not known still goes at a rate for a time,
+        // which is all a package that names no progress can be told by.
         (None, Some(now), Some(overall)) => tr!(
             l,
             "速度 {now}/s，已用时 {elapsed} 秒，平均 {overall}/s",
             "速度 {now}/s，已耗時 {elapsed} 秒，平均 {overall}/s",
             "{now}/s · {elapsed} s so far · {overall}/s on average"
         ),
+        (None, Some(now), None) => tr!(l, "正在刷写，速度 {now}/s", "正在刷寫，速度 {now}/s", "Writing at {now}/s"),
+        (None, None, _) => tr!(l, "已用时 {elapsed} 秒", "已耗時 {elapsed} 秒", "{elapsed} s so far"),
         _ => return y,
     };
     widgets::footnote(c, t, f, y, &said)
@@ -1059,23 +1064,14 @@ fn pace_line(c: &mut Canvas, cx: &Ctx, y: f32) -> f32 {
 /// What the install script showed, where there is any: its heading with how
 /// far it says it is, and under it the lines as the page's long list, the
 /// last thing on the page.
+/// What the install script showed, where there is any: its heading, and
+/// under it the lines as the page's long list, the last thing on the page.
 fn script_output(c: &mut Canvas, cx: &Ctx, y: f32, rows: &mut Option<Rows>) -> f32 {
     let lines = &cx.state.script_output;
     if lines.is_empty() {
         return y;
     }
-    let l = cx.state.lang;
-    let said = l.pick(["安装脚本输出", "安裝指令碼輸出", "Install script output"]);
-    // How far the script says it is, as it says it: a thousandth at a time,
-    // which its own progress line gives where it writes one.
-    let heading = match install_stage(&cx.state.install) {
-        Some(Stage::Script { thousandths, .. }) => {
-            let p = (*thousandths as f32 / 10.0).round() as u32;
-            format!("{said} · {p}%")
-        }
-        _ => said.to_string(),
-    };
-    let y = widgets::section(c, cx.t, cx.f, y, &heading);
+    let y = widgets::section(c, cx.t, cx.f, y, cx.state.lang.pick(["安装脚本输出", "安裝指令碼輸出", "Install script output"]));
     *rows = Some(Rows { edges: widgets::output_edges(c, cx.t, cx.f, y, lines), action: None });
     y
 }
@@ -3835,7 +3831,7 @@ mod tests {
         let l = Lang::Hans;
         assert_eq!(script_stage(l, None, &[]), ("正在运行安装脚本", None));
         assert_eq!(script_stage(Lang::En, None, &[]), ("Running the install script", None));
-        assert_eq!(script_stage(l, Some(&Stage::Script { thousandths: 250, done: 1, total: 4 }), &said), ("- Flashing boot", Some(0.25)), "past a blank line");
+        assert_eq!(script_stage(l, Some(&Stage::Script { thousandths: 250, steps: 2, elapsed_ms: 900 }), &said), ("- Flashing boot", Some(0.25)), "past a blank line");
         assert_eq!(script_stage(l, Some(&Stage::Reflashing { done: 1, total: 4 }), &said), ("正在重新刷入 Skyward", Some(0.25)));
         assert_eq!(update_stage(Lang::En, Some(&Stage::Reflashing { done: 3, total: 4 })), ("Flashing Skyward again".to_string(), Some(0.75)));
         assert_eq!(update_stage(Lang::Hant, Some(&Stage::Writing { done: 1, total: 4 })).0, "第 1 步，共 3 步：寫入新系統 25%");

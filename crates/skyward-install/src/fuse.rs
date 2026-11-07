@@ -119,6 +119,10 @@ pub struct Server {
     fault: Option<Fault>,
     /// The furthest byte any read reached.
     served: u64,
+    /// Every byte handed out, counted over again where a read comes back
+    /// for what was read before: what a package being pulled apart costs,
+    /// which the furthest byte does not tell once its directory is read.
+    pulled: u64,
 }
 
 impl Server {
@@ -130,11 +134,18 @@ impl Server {
             block: vec![0; offer.block_size as usize],
             fault: None,
             served: 0,
+            pulled: 0,
         }
     }
 
     pub fn served(&self) -> u64 {
         self.served
+    }
+
+    /// Every byte handed out so far, counted over again where the same bytes
+    /// are read twice.
+    pub fn pulled(&self) -> u64 {
+        self.pulled
     }
 
     pub fn fault(&self) -> Option<&Fault> {
@@ -242,6 +253,7 @@ impl Server {
             at += take as u64;
         }
         self.served = self.served.max(at.min(self.offer.size));
+        self.pulled += size as u64;
         reply(unique, &data)
     }
 
@@ -313,6 +325,7 @@ mod device {
     pub struct Mount<S> {
         thread: JoinHandle<(S, Result<Option<Fault>>)>,
         served: Arc<AtomicU64>,
+        pulled: Arc<AtomicU64>,
     }
 
     /// Mount the package `offer` describes at /sideload, read-only.
@@ -349,21 +362,22 @@ mod device {
         /// Serve the package from `source`.
         pub fn serve<S: Source + Send + 'static>(self, source: S) -> Mount<S> {
             let served = Arc::new(AtomicU64::new(0));
-            let reach = served.clone();
+            let pulled = Arc::new(AtomicU64::new(0));
+            let (reach, drawn) = (served.clone(), pulled.clone());
             let thread = thread::Builder::new()
                 .name("sideload-fuse".into())
                 .spawn(move || {
                     let mut source = source;
                     let mut server = Server::new(self.offer);
-                    let result = serve(&self.dev, &mut server, &mut source, &reach);
+                    let result = serve(&self.dev, &mut server, &mut source, &reach, &drawn);
                     (source, result.map(|()| server.fault().cloned()))
                 })
                 .expect("the FUSE thread starts");
-            Mount { thread, served }
+            Mount { thread, served, pulled }
         }
     }
 
-    fn serve(dev: &File, server: &mut Server, source: &mut impl Source, served: &AtomicU64) -> Result<()> {
+    fn serve(dev: &File, server: &mut Server, source: &mut impl Source, served: &AtomicU64, pulled: &AtomicU64) -> Result<()> {
         let mut buf = vec![0u8; REQUEST_BUFFER];
         loop {
             let n = match { dev }.read(&mut buf) {
@@ -376,6 +390,7 @@ mod device {
             let mut fetch = |index: u64, out: &mut [u8]| source.read_block(index, out);
             let handled = server.handle(&buf[..n], &mut fetch)?;
             served.store(server.served(), Ordering::Relaxed);
+            pulled.store(server.pulled(), Ordering::Relaxed);
             match handled {
                 Handled::Reply(r) => answer(dev, &r)?,
                 Handled::Silent => {}
@@ -398,6 +413,14 @@ mod device {
         /// How far into the package reads have reached.
         pub fn served(&self) -> u64 {
             self.served.load(Ordering::Relaxed)
+        }
+
+        /// Every byte handed out so far, counted again where the same bytes
+        /// come back: the work a package being pulled apart costs, which the
+        /// furthest byte does not tell once its directory is read and the
+        /// whole package is in reach.
+        pub fn pulled(&self) -> u64 {
+            self.pulled.load(Ordering::Relaxed)
         }
 
         /// Stop serving and unmount. The source always comes back; the

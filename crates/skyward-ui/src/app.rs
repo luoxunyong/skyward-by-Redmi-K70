@@ -1537,7 +1537,9 @@ fn stage_bytes(stage: &Stage) -> (u64, u64) {
             (*done, *total)
         }
         Stage::Verifying { index, count, .. } => (*index as u64, *count as u64),
-        Stage::Script { done, total, .. } => (*done, *total),
+        // A script moves on by the steps it takes, of how many the run has
+        // come to expect from it; `total` of nothing where none has said yet.
+        Stage::Script { steps, .. } => (*steps, 0),
         Stage::Finishing => (0, 0),
     }
 }
@@ -1567,16 +1569,20 @@ pub struct Pace {
 }
 
 impl Pace {
-    /// Take how far a step is, `done` of `total` bytes, at `now`; `total` of
-    /// nothing for a step whose size is not known.
+    /// Take how far a step is, `done` of `total`, at `now`; `total` of
+    /// nothing for a step whose size is not known, which still moves on at a
+    /// rate and still tells how long it has been at it.
     pub fn at(&mut self, done: u64, total: u64, now: u64) {
-        if total == 0 {
-            *self = Pace::default();
-            return;
-        }
         // A step that starts, or whose total changed, is a new one.
-        if self.started.is_none() || self.total != total || done < self.done {
+        let restarted = match self.started {
+            None => true,
+            Some(_) => (total != 0 && self.total != 0 && total != self.total) || done < self.done,
+        };
+        if restarted {
             *self = Pace { started: Some(now), total, ..Pace::default() };
+        }
+        if total != 0 {
+            self.total = total;
         }
         self.done = done;
         self.elapsed = now.saturating_sub(self.started.unwrap_or(now));
@@ -1616,14 +1622,25 @@ impl Pace {
     }
 
     /// How many seconds the step has left, from the rate it moves at now and
-    /// the bytes still to come; `None` where no rate is known yet.
+    /// the work still to come; `None` where no rate is known yet, or where
+    /// how much is left is not known at all.
     ///
     /// The rate is taken to the whole number the page shows first, so the
     /// seconds left and the rate told beside them are of the same reading.
     pub fn left(&self) -> Option<u64> {
+        if self.total == 0 {
+            return None;
+        }
         let rate = crate::fmt::pace_bytes_per_second(self.rate()?);
         let left = self.total.saturating_sub(self.done) as f64;
         (rate > 0.0).then(|| (left / rate).ceil() as u64)
+    }
+
+    /// Whether how much of the step is left is known at all: a script that
+    /// names no progress of its own knows how fast it goes and for how long,
+    /// but not how much more it has to do.
+    pub fn sized(&self) -> bool {
+        self.total > 0
     }
 
     /// How many seconds the step has been at it.
@@ -1631,9 +1648,26 @@ impl Pace {
         self.elapsed / 1000
     }
 
-    /// Whether the step has anything to say: it has started and has a size.
+    /// Whether the step has anything to say: it has started, whether or not
+    /// how much of it is left is known.
     pub fn known(&self) -> bool {
-        self.started.is_some() && self.total > 0
+        self.started.is_some()
+    }
+
+    /// What the step was first taken at, and the bytes it has done and has
+    /// to do, for a page that has to say why nothing shows.
+    pub fn started_at(&self) -> Option<u64> {
+        self.started
+    }
+
+    /// The bytes the step has done and has to do.
+    pub fn done_bytes(&self) -> u64 {
+        self.done
+    }
+
+    /// The bytes the step has to do.
+    pub fn total_bytes(&self) -> u64 {
+        self.total
     }
 }
 
@@ -9005,11 +9039,9 @@ mod tests {
         for line in ["- Flashing boot", " ", "- Done"] {
             app.install(Event::Print(line.into()), 1000);
         }
-        app.install(Event::Progress(Stage::Script { thousandths: 500, done: 1 << 20, total: 2 << 20 }), 1000);
-        assert_eq!(
-            app.state.install,
-            Install::Scripting { stage: Some(Stage::Script { thousandths: 500, done: 1 << 20, total: 2 << 20 }), running: true }
-        );
+        let step = Stage::Script { thousandths: 500, steps: 12, elapsed_ms: 5000 };
+        app.install(Event::Progress(step.clone()), 1000);
+        assert_eq!(app.state.install, Install::Scripting { stage: Some(step), running: true });
         let fr = app.frame(&f, &i);
         assert!(fr.hits.is_empty(), "nothing on the page to tap while the script runs");
         assert_eq!(fr.rows.as_ref().map(Rows::count), Some(3), "a row to each line it showed");
@@ -9127,11 +9159,17 @@ mod tests {
         }
         assert_eq!(pace.left(), Some(5));
 
-        // A step whose size is not known yet says nothing.
+        // A step whose size is not known still says how long it has been at
+        // it and how fast it goes, which is all a package that names no
+        // progress of its own can be told by; what it has left, it cannot.
         let mut pace = Pace::default();
         pace.at(1000, 0, 1000);
-        assert!(!pace.known());
-        assert_eq!(pace.left(), None);
+        pace.at(3000, 0, 3000);
+        assert!(pace.known(), "a step of unknown size is still under way");
+        assert!(!pace.sized());
+        assert_eq!(pace.left(), None, "how much is left is not known");
+        assert!(pace.rate().is_some(), "how fast it goes is");
+        assert_eq!(pace.elapsed(), 2);
     }
 
     #[test]

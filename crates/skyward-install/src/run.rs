@@ -455,7 +455,7 @@ fn install<S>(ctx: &mut Context, mount: &Mount<S>, size: u64) -> Result<Done> {
         // where it goes.
         Package::Image(_) if matches!(ctx.origin, Origin::Asked { .. }) => Ok(Done::Decided(Outcome::Refused(Refusal::Image))),
         Package::Image(kind) => flash_image(ctx, kind, size),
-        Package::Script => run_script(ctx, size, || mount.served()),
+        Package::Script => run_script(ctx, size, || mount.pulled()),
         Package::Unknown => Ok(Done::Decided(Outcome::Refused(Refusal::Unknown))),
     }
 }
@@ -878,6 +878,17 @@ impl Drop for Group {
     }
 }
 
+/// Whether a line the script printed names a step of its work: a package
+/// that writes a partition at a time says `正在刷入system分区` before each,
+/// in whatever words, and counting those lines is how far along it is.
+fn names_a_step(line: &str) -> bool {
+    // The words the recoveries' packages use for writing a partition, in
+    // the languages these packages are written in.
+    let marks = ["刷入", "刷寫", "写入", "寫入", "flashing", "Flashing", "writing", "Writing"];
+    let partitions = ["分区", "分割區", "partition", "Partition"];
+    marks.iter().any(|m| line.contains(m)) && partitions.iter().any(|p| line.contains(p))
+}
+
 /// Run the install script: show what it prints and how far it says it is,
 /// keep all it asks for and writes in the log, and give how it ended and
 /// whether it asked for the cache partition to be erased after. What it
@@ -943,16 +954,19 @@ fn run_binary(ctx: &Context, size: u64, served: &impl Fn() -> u64) -> Result<(i3
 
     let started = Instant::now();
     let mut bar = Bar::default();
-    // What the script says of its own progress, or the share of the package
-    // it has had read where it says nothing: a package flash reads a
-    // partition at a time and never hears of a bar, so what it has read is
-    // the only measure of how far it is.
-    let thousandths = |bar: &Bar, read: u64| {
-        bar.share(started.elapsed())
-            .or_else(|| (size > 0).then(|| (read as f32 / size as f32).clamp(0.0, 1.0)))
-            .map(|share| (share * 1000.0).round() as u16)
-    };
+    // The share the script itself says it is at, where it says one; a
+    // package that flashes a partition at a time names none, and its steps
+    // and the bytes it has pulled are what the page goes by instead.
+    let thousandths = |bar: &Bar| bar.share(started.elapsed()).map(|share| (share * 1000.0).round() as u16);
     let (mut shown, mut told) = (None, Instant::now());
+    // The steps the script said it took, counted from the lines it writes as
+    // it goes: a package that flashes a partition at a time says so with a
+    // line for each, and that count is the only measure of how far it is
+    // where it names no progress of its own. The bytes read tell nothing of
+    // it: a zip is opened at its end first and each file read from wherever
+    // it lies, so what has been read reaches the whole package at once.
+    let mut steps = 0u64;
+    let mut told_steps = 0u64;
     let mut wipe_cache = false;
     let mut ended = None;
     let mut others_ended = false;
@@ -963,6 +977,9 @@ fn run_binary(ctx: &Context, size: u64, served: &impl Fn() -> u64) -> Result<(i3
             Ok(Said::Request(Request::Print(text))) if text.is_empty() => {}
             Ok(Said::Request(Request::Print(text))) => {
                 writeln!(log, "{text}").context("write the log")?;
+                if names_a_step(&text) {
+                    steps += 1;
+                }
                 ctx.send(Event::Print(text));
             }
             Ok(Said::Request(Request::WipeCache)) => {
@@ -978,11 +995,23 @@ fn run_binary(ctx: &Context, size: u64, served: &impl Fn() -> u64) -> Result<(i3
             // Every output has closed: the script, and all it ran, are done.
             Err(RecvTimeoutError::Disconnected) => break,
         }
-        if let Some(now) = thousandths(&bar, served()).filter(|&now| shown != Some(now) && told.elapsed() >= PROGRESS_EVERY) {
-            shown = Some(now);
-            told = Instant::now();
-            let read = served();
-            ctx.send(Event::Progress(Stage::Script { thousandths: now, done: read.min(size), total: size }));
+        // How far it is, told as it moves on: the share the script says
+        // where it says one, and every step it takes where it says none, at
+        // most this often. What it has pulled tells the page the rate it
+        // reads at, which is not how far along it is.
+        if told.elapsed() >= PROGRESS_EVERY {
+            let share = thousandths(&bar).or_else(|| (steps > 0).then_some(u16::MAX));
+            let moved = share.is_some_and(|now| shown != Some(now)) || steps != told_steps;
+            if moved {
+                shown = share;
+                told_steps = steps;
+                told = Instant::now();
+                ctx.send(Event::Progress(Stage::Script {
+                    thousandths: share.unwrap_or(0),
+                    steps,
+                    elapsed_ms: started.elapsed().as_millis() as u64,
+                }));
+            }
         }
         if ended.is_none() {
             ended = child.try_wait().context("see whether the install script has ended")?.map(|status| (status, Instant::now()));
@@ -1000,8 +1029,8 @@ fn run_binary(ctx: &Context, size: u64, served: &impl Fn() -> u64) -> Result<(i3
     }
     // Where the script got last, which telling the screen at most so often
     // may have held back.
-    if let Some(last) = thousandths(&bar, served()).filter(|&last| shown != Some(last)) {
-        ctx.send(Event::Progress(Stage::Script { thousandths: last, done: served().min(size), total: size }));
+    if let Some(last) = thousandths(&bar).filter(|&last| shown != Some(last)) {
+        ctx.send(Event::Progress(Stage::Script { thousandths: last, steps, elapsed_ms: started.elapsed().as_millis() as u64 }));
     }
     let status = match ended {
         Some((status, _)) => status,
