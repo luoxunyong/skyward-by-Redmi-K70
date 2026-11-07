@@ -1550,9 +1550,10 @@ fn stage_bytes(stage: &Stage) -> (u64, u64) {
             (*done, *total)
         }
         Stage::Verifying { index, count, .. } => (*index as u64, *count as u64),
-        // A script moves on by the steps it takes, of how many the run has
-        // come to expect from it; `total` of nothing where none has said yet.
-        Stage::Script { steps, .. } => (*steps, 0),
+        // A script pulls the package apart as it goes, so what it has pulled
+        // is what its rate is read from; how far along it is, only its own
+        // steps say, and how many there are is not known.
+        Stage::Script { pulled, .. } => (*pulled, 0),
         Stage::Finishing => (0, 0),
     }
 }
@@ -9106,7 +9107,7 @@ mod tests {
         for line in ["- Flashing boot", " ", "- Done"] {
             app.install(Event::Print(line.into()), 1000);
         }
-        let step = Stage::Script { thousandths: 500, steps: 12, elapsed_ms: 5000 };
+        let step = Stage::Script { thousandths: 500, steps: 12, pulled: 3 << 20, elapsed_ms: 5000 };
         app.install(Event::Progress(step.clone()), 1000);
         assert_eq!(app.state.install, Install::Scripting { stage: Some(step), running: true });
         let fr = app.frame(&f, &i);

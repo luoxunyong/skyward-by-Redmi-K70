@@ -1061,52 +1061,6 @@ fn pace_line(c: &mut Canvas, cx: &Ctx, y: f32) -> f32 {
     widgets::footnote(c, t, f, y, &said)
 }
 
-/// What the install script showed, where there is any: its heading with how
-/// far it says it is, and under it the lines as the page's long list, the
-/// last thing on the page.
-/// The strip held at the bottom while an install script runs: the bar, and
-/// under it the rate it moves on at. The page is laid out with its height
-/// kept off the end, so the script's own output scrolls above it and no
-/// line of it stays hidden under the strip.
-fn script_dock(cx: &Ctx, stage: Option<&Stage>) -> Dock {
-    let (t, f, l) = (cx.t, cx.f, cx.state.lang);
-    let m = &t.m;
-    let rate = cx.state.pace.rate().map(fmt::pace);
-    let share = match stage {
-        Some(Stage::Script { thousandths, .. }) => Some(f32::from(*thousandths) / 1000.0),
-        _ => None,
-    };
-    let said = match (&rate, cx.state.pace.elapsed()) {
-        (Some(rate), at) => tr!(l, "速度 {rate}/s · 已用时 {at} 秒", "速度 {rate}/s · 已耗時 {at} 秒", "{rate}/s · {at} s"),
-        (None, at) => tr!(l, "已用时 {at} 秒", "已耗時 {at} 秒", "{at} s"),
-    };
-    let h = m.dp(DOCK_H) as u32;
-    let mut c = Canvas::unfilled(m.w, h, 0..h);
-    c.clear(t.pal.bg);
-    let pad = m.dp(DOCK_PAD);
-    let line_y = pad + t.m.dp(11.0);
-    c.text_vc(&f.body, &said, m.margin, line_y, m.sub_px, t.pal.info, None);
-    if let Some(share) = share {
-        widgets::progress_bar(&mut c, t, m.margin, pad + m.dp(24.0), m.w as f32 - m.margin * 2.0, share);
-    } else {
-        // A step whose end is not known shows a bar that runs on its own,
-        // so the strip still says the work has not stopped.
-        let x = m.margin;
-        let w = m.w as f32 - m.margin * 2.0;
-        let y = pad + m.dp(24.0);
-        c.fill_round_rect(x, y, w, m.dp(6.0), m.dp(3.0), t.pal.track);
-        let span = (w * 0.3).max(m.dp(24.0));
-        let travelled = cx.state.pace.elapsed() as f32 * 0.25 % (w - span).max(1.0);
-        c.fill_round_rect(x + travelled, y, span, m.dp(6.0), m.dp(3.0), t.pal.accent);
-    }
-    Dock { canvas: c, hits: Vec::new() }
-}
-
-/// How tall the strip at the bottom of the installing page is, in dp, and
-/// how far its words stand from its top.
-const DOCK_H: f32 = 44.0;
-const DOCK_PAD: f32 = 8.0;
-
 /// What the install script showed, where there is any: its heading, and
 /// under it the lines as the page's long list, the last thing on the page.
 fn script_output(c: &mut Canvas, cx: &Ctx, y: f32, rows: &mut Option<Rows>) -> f32 {
@@ -1154,7 +1108,6 @@ pub fn installing(cx: &Ctx) -> Frame {
     let (t, f, s, i, l) = (cx.t, cx.f, cx.state, cx.info, cx.state.lang);
     let mut c = long_page(cx);
     let (mut out, mut rows) = (Vec::new(), None);
-    let mut dock: Option<Dock> = None;
     let top = t.m.content_top;
     let computer = s.source == Source::Computer;
     let bottom = match &s.install {
@@ -1407,15 +1360,10 @@ pub fn installing(cx: &Ctx) -> Frame {
             let (detail, done) = script_stage(l, stage.as_ref(), &s.script_output);
             let y = widgets::progress_card(&mut c, t, f, top, l.pick(["正在安装", "正在安裝", "Installing"]), detail, done);
             let y = widgets::footnote(&mut c, t, f, y, until_installed(l, s.source));
-            // How fast it moves on and how long it has left, over the
-            // script's own output, which keeps its room below.
-            let y = pace_line(&mut c, cx, y);
-            // The bar and the rate, held at the bottom of the screen where
-            // the script's output scrolls under them: the page is laid out
-            // with the strip's height kept off its end, so no line of the
-            // output stays under it.
-            dock = Some(script_dock(cx, stage.as_ref()));
-            script_output(&mut c, cx, y, &mut rows)
+            let y = script_output(&mut c, cx, y, &mut rows);
+            // How fast it moves on and how long it has been at it, under the
+            // script's own output, at the end of the page.
+            pace_line(&mut c, cx, y)
         }
         Install::Wiping => {
             let y = widgets::progress_card(&mut c, t, f, top, l.pick(WIPING), &capitalized(l, &factory_reset(s)), None);
@@ -1441,7 +1389,7 @@ pub fn installing(cx: &Ctx) -> Frame {
         (Source::Asked { .. }, Some(reason)) => widgets::info_card(&mut c, t, f, bottom + t.m.dp(12.0), &[(l.pick(REASON), reason.clone())]),
         _ => bottom,
     };
-    Frame { rows, dock, ..Frame::new(t, fit(c, t, bottom), out, install_title(l, s.source), top) }
+    Frame { rows, ..Frame::new(t, fit(c, t, bottom), out, install_title(l, s.source), top) }
 }
 
 /// What a request the system made gives as why.
@@ -3880,7 +3828,11 @@ mod tests {
         let l = Lang::Hans;
         assert_eq!(script_stage(l, None, &[]), ("正在运行安装脚本", None));
         assert_eq!(script_stage(Lang::En, None, &[]), ("Running the install script", None));
-        assert_eq!(script_stage(l, Some(&Stage::Script { thousandths: 250, steps: 2, elapsed_ms: 900 }), &said), ("- Flashing boot", Some(0.25)), "past a blank line");
+        assert_eq!(
+            script_stage(l, Some(&Stage::Script { thousandths: 250, steps: 2, pulled: 1 << 20, elapsed_ms: 900 }), &said),
+            ("- Flashing boot", Some(0.25)),
+            "past a blank line"
+        );
         assert_eq!(script_stage(l, Some(&Stage::Reflashing { done: 1, total: 4 }), &said), ("正在重新刷入 Skyward", Some(0.25)));
         assert_eq!(update_stage(Lang::En, Some(&Stage::Reflashing { done: 3, total: 4 })), ("Flashing Skyward again".to_string(), Some(0.75)));
         assert_eq!(update_stage(Lang::Hant, Some(&Stage::Writing { done: 1, total: 4 })).0, "第 1 步，共 3 步：寫入新系統 25%");

@@ -967,6 +967,7 @@ fn run_binary(ctx: &Context, size: u64, served: &impl Fn() -> u64) -> Result<(i3
     // it lies, so what has been read reaches the whole package at once.
     let mut steps = 0u64;
     let mut told_steps = 0u64;
+    let mut told_pulled = 0u64;
     let mut wipe_cache = false;
     let mut ended = None;
     let mut others_ended = false;
@@ -995,20 +996,24 @@ fn run_binary(ctx: &Context, size: u64, served: &impl Fn() -> u64) -> Result<(i3
             // Every output has closed: the script, and all it ran, are done.
             Err(RecvTimeoutError::Disconnected) => break,
         }
-        // How far it is, told as it moves on: the share the script says
-        // where it says one, and every step it takes where it says none, at
-        // most this often. What it has pulled tells the page the rate it
-        // reads at, which is not how far along it is.
+        // How far it is, told as it moves on: every step it takes, and every
+        // stretch of the package it pulls out, at most this often. A script
+        // that reads a partition for a minute without a word of its own
+        // still pulls bytes through the whole of it, so the page keeps
+        // moving while it does.
         if told.elapsed() >= PROGRESS_EVERY {
             let share = thousandths(&bar).or_else(|| (steps > 0).then_some(u16::MAX));
-            let moved = share.is_some_and(|now| shown != Some(now)) || steps != told_steps;
+            let pulled = served();
+            let moved = share.is_some_and(|now| shown != Some(now)) || steps != told_steps || pulled != told_pulled;
             if moved {
                 shown = share;
                 told_steps = steps;
+                told_pulled = pulled;
                 told = Instant::now();
                 ctx.send(Event::Progress(Stage::Script {
                     thousandths: share.unwrap_or(0),
                     steps,
+                    pulled,
                     elapsed_ms: started.elapsed().as_millis() as u64,
                 }));
             }
@@ -1030,7 +1035,12 @@ fn run_binary(ctx: &Context, size: u64, served: &impl Fn() -> u64) -> Result<(i3
     // Where the script got last, which telling the screen at most so often
     // may have held back.
     if let Some(last) = thousandths(&bar).filter(|&last| shown != Some(last)) {
-        ctx.send(Event::Progress(Stage::Script { thousandths: last, steps, elapsed_ms: started.elapsed().as_millis() as u64 }));
+        ctx.send(Event::Progress(Stage::Script {
+            thousandths: last,
+            steps,
+            pulled: served(),
+            elapsed_ms: started.elapsed().as_millis() as u64,
+        }));
     }
     let status = match ended {
         Some((status, _)) => status,
