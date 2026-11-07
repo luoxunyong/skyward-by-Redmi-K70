@@ -27,7 +27,8 @@ Skyward 是使用 Rust 编写的 recovery，从零开始编写。
 - MTP 文件传输、adb 和 fastbootd
 - 重启到系统、recovery、fastboot、bootloader 和 EDL，切换启动槽位
 - 浅色和深色模式，简体中文、繁体中文和英文
-
+- 预估刷机剩余时间
+- 支持切换屏幕刷新率
 ## 支持的机型
 
 | 机型 | 代号 | 测试的系统版本 |
