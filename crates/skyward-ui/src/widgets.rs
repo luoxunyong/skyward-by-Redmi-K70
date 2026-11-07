@@ -1724,11 +1724,12 @@ pub fn slider(c: &mut Canvas, t: &Theme, x: f32, top: f32, w: f32, value: f32) {
     c.fill_circle(x + fw - h / 2.0, top + h / 2.0, m.slider_knob / 2.0, Rgba::rgb(255, 255, 255));
 }
 
-/// Where a slider card ends, its track, and the row under the slider.
+/// Where a slider card ends, its track, and the rows under the slider, one
+/// for each the page gave, top first.
 pub struct SliderBlock {
     pub bottom: f32,
     pub track: Rect,
-    pub below: Option<Rect>,
+    pub below: Vec<Rect>,
 }
 
 /// The monochrome icon beside a slider card's caption.
@@ -1741,16 +1742,17 @@ pub enum Caption {
 
 /// Card with a monochrome icon caption, a slider, and an optional row below.
 #[allow(clippy::too_many_arguments)]
-pub fn slider_card(c: &mut Canvas, t: &Theme, f: &Fonts, top: f32, caption: Caption, label: &str, value: f32, below: Option<Row>) -> SliderBlock {
+pub fn slider_card(c: &mut Canvas, t: &Theme, f: &Fonts, top: f32, caption: Caption, label: &str, value: f32, below: &[Row]) -> SliderBlock {
     let m = &t.m;
     let (card_x, right) = (m.margin, m.w as f32 - m.margin);
-    let below_lay = below.as_ref().map(|r| layout(c, t, f, r));
+    let below_lays: Vec<Layout> = below.iter().map(|r| layout(c, t, f, r)).collect();
     let slider_top = top + m.dp(55.0);
     let slider_bottom = slider_top + m.slider_h;
     let below_gap = m.dp(16.3);
-    let h = match &below_lay {
-        Some(l) => slider_bottom - top + below_gap + l.h,
-        None => slider_bottom - top + m.dp(18.0),
+    let rows_h: f32 = below_lays.iter().map(|l| l.h).sum();
+    let h = match below_lays.is_empty() {
+        false => slider_bottom - top + below_gap + rows_h,
+        true => slider_bottom - top + m.dp(18.0),
     };
     c.fill_round_rect(card_x, top, right - card_x, h, m.card_radius, t.pal.card);
 
@@ -1782,13 +1784,14 @@ pub fn slider_card(c: &mut Canvas, t: &Theme, f: &Fonts, top: f32, caption: Capt
     c.text_vc(&f.heading, label, card_x + m.dp(53.7), lcy, m.account_title_px, t.pal.info, None);
     let track = Rect::new(card_x + m.inner, slider_top, right - card_x - m.inner * 2.0, m.slider_h);
     slider(c, t, track.x, track.y, track.w, value);
-    let mut below_rect = None;
-    if let (Some(r), Some(l)) = (below, below_lay) {
-        let y = slider_bottom + below_gap;
-        draw_row(c, t, f, &r, &l, y, &Tone::page(t));
-        below_rect = Some(Rect::new(card_x, y, right - card_x, l.h));
+    let mut below_rects = Vec::new();
+    let mut y = slider_bottom + below_gap;
+    for (r, l) in below.iter().zip(&below_lays) {
+        draw_row(c, t, f, r, l, y, &Tone::page(t));
+        below_rects.push(Rect::new(card_x, y, right - card_x, l.h));
+        y += l.h;
     }
-    SliderBlock { bottom: top + h, track, below: below_rect }
+    SliderBlock { bottom: top + h, track, below: below_rects }
 }
 
 /// Swipe-to-confirm control in the thick-slider style; `progress` (0 to 1)

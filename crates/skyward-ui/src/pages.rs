@@ -318,23 +318,26 @@ pub fn settings(cx: &Ctx) -> Frame {
     let themes = widgets::theme_picker(&mut c, t, f, l, top + t.m.dp(8.9));
     out.extend(hits(&themes.rows, &[Action::Theme { dark: false }, Action::Theme { dark: true }]));
     let mut y = widgets::section(&mut c, t, f, themes.bottom, l.pick(["亮度", "亮度", "Brightness"]));
+    // The time the screen stays on and the rate the panel runs at are the
+    // same kind of reading of the same screen, so they share the card the
+    // brightness slider heads.
     let off = fmt::screen_off(l, SCREEN_OFF[s.screen_off]);
-    let below = Row::new(l.pick(SCREEN_TIMEOUT)).trail(Trail::Value(&off));
-    let slider = widgets::slider_card(&mut c, t, f, y, Caption::Sun, l.pick(["屏幕亮度", "螢幕亮度", "Screen brightness"]), s.brightness, Some(below));
-    out.push(Hit { rect: slider.track, action: Action::Slider(Slider::Brightness) });
-    if let Some(r) = slider.below {
-        out.push(Hit { rect: r, action: Action::Open(Screen::ScreenOff) });
-    }
-    // The panel's own rate, right under the time the screen stays on.
     let rate = refresh_rate_name(l, REFRESH_RATES[s.refresh_rate]);
-    let rates = widgets::list(&mut c, t, f, slider.bottom, &[Row::new(l.pick(REFRESH_RATE)).trail(Trail::Value(&rate))]);
-    out.extend(hits(&rates.rows, &[Action::Open(Screen::RefreshRate)]));
-    y = widgets::section(&mut c, t, f, rates.bottom, l.pick(["振动", "震動", "Vibration"]));
-    let below = Row::new(l.pick(["触摸振动", "觸控震動", "Touch vibration"])).trail(Trail::Switch(s.vibrate));
-    let vibration = widgets::slider_card(&mut c, t, f, y, Caption::Vibrate, l.pick(["振动强度", "震動強度", "Vibration intensity"]), s.vibration, Some(below));
+    let below = [
+        Row::new(l.pick(SCREEN_TIMEOUT)).trail(Trail::Value(&off)),
+        Row::new(l.pick(REFRESH_RATE)).trail(Trail::Value(&rate)),
+    ];
+    let slider = widgets::slider_card(&mut c, t, f, y, Caption::Sun, l.pick(["屏幕亮度", "螢幕亮度", "Screen brightness"]), s.brightness, &below);
+    out.push(Hit { rect: slider.track, action: Action::Slider(Slider::Brightness) });
+    for (r, action) in slider.below.iter().zip([Action::Open(Screen::ScreenOff), Action::Open(Screen::RefreshRate)]) {
+        out.push(Hit { rect: *r, action });
+    }
+    y = widgets::section(&mut c, t, f, slider.bottom, l.pick(["振动", "震動", "Vibration"]));
+    let below = [Row::new(l.pick(["触摸振动", "觸控震動", "Touch vibration"])).trail(Trail::Switch(s.vibrate))];
+    let vibration = widgets::slider_card(&mut c, t, f, y, Caption::Vibrate, l.pick(["振动强度", "震動強度", "Vibration intensity"]), s.vibration, &below);
     out.push(Hit { rect: vibration.track, action: Action::Slider(Slider::Vibration) });
-    if let Some(r) = vibration.below {
-        out.push(Hit { rect: r, action: Action::Toggle(Switch::Vibrate) });
+    for (r, action) in vibration.below.iter().zip([Action::Toggle(Switch::Vibrate)]) {
+        out.push(Hit { rect: *r, action });
     }
     y = widgets::section(&mut c, t, f, vibration.bottom, l.pick(["通用", "一般", "General"]));
     let general = widgets::list(&mut c, t, f, y, &[

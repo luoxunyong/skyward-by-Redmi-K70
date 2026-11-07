@@ -455,7 +455,7 @@ fn install<S>(ctx: &mut Context, mount: &Mount<S>, size: u64) -> Result<Done> {
         // where it goes.
         Package::Image(_) if matches!(ctx.origin, Origin::Asked { .. }) => Ok(Done::Decided(Outcome::Refused(Refusal::Image))),
         Package::Image(kind) => flash_image(ctx, kind, size),
-        Package::Script => run_script(ctx, size),
+        Package::Script => run_script(ctx, size, || mount.served()),
         Package::Unknown => Ok(Done::Decided(Outcome::Refused(Refusal::Unknown))),
     }
 }
@@ -754,7 +754,7 @@ fn flash_image(ctx: &Context, kind: ImageKind, size: u64) -> Result<Done> {
 /// for give them: their shell at /sbin, and the slot's partitions mapped
 /// writable and unmounted. Where the screen asked for it, the zip is first
 /// checked to be signed with one of the phone's update keys.
-fn run_script(ctx: &mut Context, size: u64) -> Result<Done> {
+fn run_script(ctx: &mut Context, size: u64, served: impl Fn() -> u64) -> Result<Done> {
     if let Some(refusal) = short_of_charge(ctx.origin)? {
         return Ok(Done::Decided(Outcome::Refused(refusal)));
     }
@@ -795,7 +795,7 @@ fn run_script(ctx: &mut Context, size: u64) -> Result<Done> {
         }
     };
     let mounted = skyward_block::mount::mount_ids()?;
-    let ran = run_binary(ctx);
+    let ran = run_binary(ctx, size, &served);
     if let Err(e) = clean_up(&mounted, &mapped) {
         let _ = kmsg(&format!("install: not all the script left behind was taken away: {e:#}"));
     }
@@ -882,7 +882,11 @@ impl Drop for Group {
 /// keep all it asks for and writes in the log, and give how it ended and
 /// whether it asked for the cache partition to be erased after. What it
 /// leaves running is ended with it.
-fn run_binary(ctx: &Context) -> Result<(i32, bool)> {
+///
+/// `served` gives how many bytes of the package have been read so far: a
+/// script that names no progress of its own is shown how far it is by what
+/// it has had read, which is the work it waits on.
+fn run_binary(ctx: &Context, size: u64, served: &impl Fn() -> u64) -> Result<(i32, bool)> {
     let mut log = File::create(SCRIPT_LOG).with_context(|| format!("create {SCRIPT_LOG}"))?;
     let (requests_read, requests_write) = pipe(0)?;
     let (output_read, output_write) = pipe(0)?;
@@ -939,7 +943,15 @@ fn run_binary(ctx: &Context) -> Result<(i32, bool)> {
 
     let started = Instant::now();
     let mut bar = Bar::default();
-    let thousandths = |bar: &Bar| bar.share(started.elapsed()).map(|share| (share * 1000.0).round() as u16);
+    // What the script says of its own progress, or the share of the package
+    // it has had read where it says nothing: a package flash reads a
+    // partition at a time and never hears of a bar, so what it has read is
+    // the only measure of how far it is.
+    let thousandths = |bar: &Bar, read: u64| {
+        bar.share(started.elapsed())
+            .or_else(|| (size > 0).then(|| (read as f32 / size as f32).clamp(0.0, 1.0)))
+            .map(|share| (share * 1000.0).round() as u16)
+    };
     let (mut shown, mut told) = (None, Instant::now());
     let mut wipe_cache = false;
     let mut ended = None;
@@ -966,7 +978,7 @@ fn run_binary(ctx: &Context) -> Result<(i32, bool)> {
             // Every output has closed: the script, and all it ran, are done.
             Err(RecvTimeoutError::Disconnected) => break,
         }
-        if let Some(now) = thousandths(&bar).filter(|&now| shown != Some(now) && told.elapsed() >= PROGRESS_EVERY) {
+        if let Some(now) = thousandths(&bar, served()).filter(|&now| shown != Some(now) && told.elapsed() >= PROGRESS_EVERY) {
             shown = Some(now);
             told = Instant::now();
             ctx.send(Event::Progress(Stage::Script { thousandths: now }));
@@ -987,7 +999,7 @@ fn run_binary(ctx: &Context) -> Result<(i32, bool)> {
     }
     // Where the script got last, which telling the screen at most so often
     // may have held back.
-    if let Some(last) = thousandths(&bar).filter(|&last| shown != Some(last)) {
+    if let Some(last) = thousandths(&bar, served()).filter(|&last| shown != Some(last)) {
         ctx.send(Event::Progress(Stage::Script { thousandths: last }));
     }
     let status = match ended {

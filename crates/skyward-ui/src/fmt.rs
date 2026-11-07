@@ -1169,7 +1169,8 @@ pub fn failure(l: Lang, f: &Failure, source: Source) -> (String, Option<String>)
             (what, Some(tr!(l, "错误代码：{code}", "錯誤代碼：{code}", "Error code: {code}")))
         }
         Failure::Script(code) => {
-            (tr!(l, "安装脚本运行失败，退出码为 {code}。", "安裝指令碼執行失敗，結束代碼為 {code}。", "The install script failed with exit code {code}."), None)
+            let said = tr!(l, "安装脚本运行失败，退出码为 {code}。", "安裝指令碼執行失敗，結束代碼為 {code}。", "The install script failed with exit code {code}.");
+            (said, exit_meaning(l, *code))
         }
         Failure::Disconnected => (
             said(["电脑已停止发送，请检查数据线连接后重新发送。", "電腦已停止傳送，請檢查傳輸線連接後重新傳送。", "The computer stopped sending. Check the cable, then send it again."]),
@@ -1192,6 +1193,61 @@ pub fn failure(l: Lang, f: &Failure, source: Source) -> (String, Option<String>)
         },
         Failure::Error(detail) => (said(UNEXPECTED), Some(detail.clone())),
     }
+}
+
+/// What an install script that ended with `code` most often came to, as the
+/// recovery can tell it: a shell's own codes, which almost every script that
+/// stops short ends on, and the ones a script writes itself.
+fn exit_meaning(l: Lang, code: i32) -> Option<String> {
+    let said: Text = match code {
+        1 => [
+            "脚本自行结束，通常是机型不符、分区没找到，或包里的文件校验不通过。请看下方脚本输出中最后一行以“!”或“Error”开头的内容。",
+            "指令碼自行結束，通常是機型不符、分割區沒找到，或包裡的檔案驗證不通過。請看下方指令碼輸出中最後一行以「!」或「Error」開頭的內容。",
+            "The script exited on its own, most often because the phone is not the one it is for, a partition it wants is missing, or a file it checked did not match. The last line of its output starting with \"!\" or \"Error\" says which.",
+        ],
+        2 => [
+            "脚本用法有误，或它调用的程序参数不对。多见于包内自带的工具与本机不兼容。",
+            "指令碼用法有誤，或它呼叫的程式參數不對。多見於包內自帶的工具與本機不相容。",
+            "The script was used wrongly, or passed an argument a program it ran did not take; often a tool the zip carries that does not suit this phone.",
+        ],
+        126 => [
+            "脚本找到了，但没有执行权限。",
+            "指令碼找到了，但沒有執行權限。",
+            "The script was found but could not be run: it has no permission to execute.",
+        ],
+        127 => [
+            "脚本要用的命令不存在。包内缺少该工具，或它装在别的路径上。",
+            "指令碼要用的指令不存在。包內缺少該工具，或它裝在別的路徑上。",
+            "A command the script wanted does not exist: the zip lacks that tool, or keeps it somewhere else.",
+        ],
+        128 => [
+            "脚本以无效的退出状态结束。",
+            "指令碼以無效的結束狀態結束。",
+            "The script ended with an exit status the shell could not use.",
+        ],
+        130 => [
+            "脚本被中断（SIGINT）。",
+            "指令碼被中斷（SIGINT）。",
+            "The script was interrupted (SIGINT).",
+        ],
+        137 => [
+            "脚本被强制结束（SIGKILL），多因内存不足或超时。",
+            "指令碼被強制結束（SIGKILL），多因記憶體不足或逾時。",
+            "The script was killed (SIGKILL), most often for running out of memory or of time.",
+        ],
+        139 => [
+            "脚本内的程序崩溃（段错误）。多为包内工具与本机架构或库不兼容。",
+            "指令碼內的程式崩潰（段錯誤）。多為包內工具與本機架構或函式庫不相容。",
+            "A program the script ran crashed (segmentation fault), most often a tool the zip carries that does not suit this phone's architecture or libraries.",
+        ],
+        143 => [
+            "脚本被正常终止（SIGTERM）。",
+            "指令碼被正常終止（SIGTERM）。",
+            "The script was asked to stop (SIGTERM).",
+        ],
+        _ => return None,
+    };
+    Some(l.pick(said).to_string())
 }
 
 /// How many of a WLAN fan's three arcs a signal of `dbm` lights.
@@ -1748,7 +1804,12 @@ mod tests {
         assert_eq!(failure(HANS, &Failure::Engine(26), pc), ("更新包签名验证失败，请发送官方更新包。".into(), Some("错误代码：26".into())));
         assert_eq!(failure(Lang::Hant, &Failure::Engine(26), pc), ("更新檔簽章驗證失敗，請傳送官方更新檔。".into(), Some("錯誤代碼：26".into())));
         assert_eq!(failure(HANS, &Failure::Error("open ep0: busy".into()), pc).1.as_deref(), Some("open ep0: busy"));
-        assert_eq!(failure(HANS, &Failure::Script(1), pc), ("安装脚本运行失败，退出码为 1。".into(), None));
+        let (said, why) = failure(HANS, &Failure::Script(1), pc);
+        assert_eq!(said, "安装脚本运行失败，退出码为 1。");
+        assert!(why.is_some_and(|w| w.contains("机型不符")), "the commonest exit code says what it usually means");
+        assert_eq!(failure(HANS, &Failure::Script(137), pc).1.as_deref().map(|w| w.contains("SIGKILL")), Some(true));
+        let odd = failure(HANS, &Failure::Script(4), pc);
+        assert_eq!(odd, ("安装脚本运行失败，退出码为 4。".into(), None), "a code with no meaning says only the code");
         assert_eq!(refusal(HANS, &Refusal::Unsigned, "ishtar", pc, 0), "该刷机包未签名，请关闭「验证刷机包签名」后重试。");
         assert_eq!(refusal(HANS, &Refusal::Unverified, "ishtar", pc, 0), "该刷机包未通过签名验证，请关闭「验证刷机包签名」后重试。");
     }
