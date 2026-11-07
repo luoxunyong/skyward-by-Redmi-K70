@@ -27,6 +27,8 @@ Skyward is a recovery written in Rust, from scratch.
 - MTP file transfer, adb and fastbootd
 - Reboot to system, recovery, fastboot, bootloader or EDL, and switch slots
 - Light and dark themes; Simplified Chinese, Traditional Chinese and English
+- Estimated remaining flashing time
+- Supports switching the screen refresh rate
 
 ## Supported devices
 
