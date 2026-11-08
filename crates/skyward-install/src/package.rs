@@ -15,6 +15,8 @@ const PROPERTIES: &str = "payload_properties.txt";
 const METADATA: &str = "META-INF/com/android/metadata";
 /// The install script of a zip that installs itself.
 pub const UPDATE_BINARY: &str = "META-INF/com/google/android/update-binary";
+/// The rules a zip's install script is told to follow, where it has them.
+pub const UPDATER_SCRIPT: &str = "META-INF/com/google/android/updater-script";
 
 /// The most read to tell an image's kind: every header this recovery
 /// writes fits in one page.

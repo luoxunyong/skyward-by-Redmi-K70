@@ -12,6 +12,7 @@ pub mod image;
 pub mod keep;
 pub mod ota;
 pub mod package;
+pub mod payload;
 pub mod script;
 pub mod signature;
 pub mod upgrade;
@@ -163,6 +164,9 @@ pub enum Outcome {
     Installed { slot: Slot, wipe: bool },
     /// The image is in the partition of these slots.
     Flashed { partition: &'static str, slots: Vec<Slot> },
+    /// A package carrying whole partition images was written: the
+    /// partitions of the phone it went into, by their names.
+    Wrote { partitions: Vec<String> },
     /// The install script ran to its end; `wipe_cache` when it asked for
     /// the cache partition to be erased after.
     Ran { wipe_cache: bool },

@@ -396,11 +396,18 @@ pub fn mounted_partitions(slot: Slot) -> Result<Vec<Mounted>> {
 /// stays mounted for the update.
 pub fn release_partitions(slot: Slot, busy: &[PathBuf]) -> Result<()> {
     for m in mounted_partitions(slot)?.into_iter().rev() {
+        // A partition that will not come off is not the end of the move: what
+        // can be let go is, and the rest is told of and left. Stopping at the
+        // first mount that refuses would leave every partition after it
+        // standing too, and the write that follows would find them all.
         if busy.contains(&m.mount_point) {
-            mount::umount_detach_over(&m.mount_point)?;
-        } else {
-            mount::umount_over(&m.mount_point)?;
-            snapshots::unmap_snapshot(&m.partition)?;
+            if let Err(e) = mount::umount_detach_over(&m.mount_point) {
+                eprintln!("install: {} stays mounted: {e:#}", m.mount_point.display());
+            }
+        } else if let Err(e) = mount::umount_over(&m.mount_point) {
+            eprintln!("install: {} stays mounted: {e:#}", m.mount_point.display());
+        } else if let Err(e) = snapshots::unmap_snapshot(&m.partition) {
+            eprintln!("install: {} stays mapped: {e:#}", m.partition);
         }
     }
     Ok(())
@@ -420,4 +427,170 @@ pub fn unmount_partitions(slot: Slot) -> Result<()> {
         mount::umount(metadata)?;
     }
     Ok(())
+}
+
+/// Let go of the slot's partitions for a package that lays super out
+/// again: every program still running from them is ended first, then each
+/// is unmounted and its device-mapper device removed.
+///
+/// A partition cannot be unmounted while a program is running from it, and
+/// the programs this recovery starts from `/vendor` — the trusted
+/// environment's daemon and the key and boot services — run from there for
+/// as long as the recovery does. What they serve is needed to read the
+/// installed system, not to write a new one, so they are ended here and
+/// the layout is free to be rewritten.
+pub fn release_whole(slot: Slot) -> Result<()> {
+    let md = skyward_lp::read(&super_device(), slot.number())?;
+    // The bundles the vendor interface is read through are whole images
+    // taken from the slot and mounted over loop devices, and a loop device
+    // on a file of a partition keeps that partition from being unmounted
+    // just as a program running from it does. They are let go first, then
+    // the programs, then the partitions themselves.
+    release_bundles();
+    for p in slot_partitions(&md, slot) {
+        let point = mount_point(base(p, slot));
+        end_running_from(&point);
+    }
+    // Every mount on those partitions comes off detached, so a program that
+    // the kernel has not yet let go of does not keep the mount, nor the
+    // device-mapper device under it, standing.
+    //
+    // A mount that will not come off is not the end of it: the package
+    // rewrites the layout itself, and a partition left standing is one the
+    // package's own unmapping will meet, rather than the whole install
+    // stopping here. The same goes for a device-mapper device that will not
+    // go: what can be let go is, and the rest is told of and left.
+    for p in slot_partitions(&md, slot).into_iter().rev() {
+        let point = mount_point(base(p, slot));
+        if mount::is_mount_point(&point).unwrap_or(false) {
+            if let Err(e) = mount::umount_detach(&point) {
+                eprintln!("install: {} stays mounted, and the package goes on without it: {e:#}", point.display());
+            }
+        }
+        if let Err(e) = unmap(&p.name, &point) {
+            // A device something still holds open is taken away by the
+            // kernel once that holder lets go, which is what the deferral
+            // asks for: the package's own unmapping then finds it gone.
+            match skyward_block::dm::remove_deferred(&p.name) {
+                Ok(()) => eprintln!("install: device-mapper device {} is taken away once its last holder lets go", p.name),
+                Err(deferred) => eprintln!(
+                    "install: device-mapper device {} stays, and the package goes on without it: {e:#}; deferred too: {deferred:#}",
+                    p.name
+                ),
+            }
+        }
+    }
+    let metadata = Path::new(METADATA);
+    if mount::is_mount_point(metadata).unwrap_or(false) {
+        let _ = mount::umount_detach(metadata);
+    }
+    Ok(())
+}
+
+/// End every program whose executable or working directory lies under
+/// `point`, giving it a moment to go.
+fn end_running_from(point: &Path) {
+    let Ok(entries) = std::fs::read_dir("/proc") else { return };
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        let Some(pid) = name.to_str().and_then(|n| n.parse::<libc::pid_t>().ok()) else { continue };
+        // The recovery itself, and its own children, are not ended: what
+        // runs them is what asks for this.
+        if pid <= 1 || pid == unsafe { libc::getpid() } {
+            continue;
+        }
+        let root = entry.path();
+        if !runs_from(&root, point) {
+            continue;
+        }
+        eprintln!("install: ending {pid}, which runs from {}", point.display());
+        unsafe { libc::kill(pid, libc::SIGKILL) };
+    }
+    // The programs ended above are let go by the kernel as it reaps them.
+    std::thread::sleep(std::time::Duration::from_millis(300));
+}
+
+/// Let go of every bundle the recovery mounted over a loop device: each is
+/// unmounted from `/apex`, its loop device taken away, and the mount point
+/// left empty. A loop device is what keeps the partition its image lies on
+/// from being unmapped, and unmounting the bundle does not take it away.
+fn release_bundles() {
+    let Ok(entries) = std::fs::read_dir("/sys/block") else { return };
+    let loops: Vec<String> = entries
+        .flatten()
+        .filter_map(|e| {
+            let name = e.file_name().to_string_lossy().into_owned();
+            name.strip_prefix("loop").is_some().then_some(name)
+        })
+        .collect();
+    for name in loops {
+        let backing = Path::new("/sys/block").join(&name).join("loop/backing_file");
+        let Ok(file) = std::fs::read_to_string(&backing) else { continue };
+        let file = file.trim().trim_end_matches(" (deleted)").to_string();
+        if file.is_empty() {
+            continue;
+        }
+        // The bundle mounted over it, if it is one: its name is the file's
+        // with `.apex` off, under any of the places bundles are mounted.
+        let stem = Path::new(&file).file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default();
+        for point in [Path::new("/apex").join(&stem), Path::new("/apex").join(&file)] {
+            if mount::is_mount_point(&point).unwrap_or(false) {
+                eprintln!("install: letting go of the bundle at {}", point.display());
+                if let Err(e) = mount::umount_detach(&point) {
+                    eprintln!("install: the bundle at {} stays mounted: {e:#}", point.display());
+                }
+            }
+        }
+        eprintln!("install: taking away the loop device {name}, which holds {file}");
+        if let Err(e) = detach_loop(&name) {
+            eprintln!("install: the loop device {name} stays: {e:#}");
+        }
+    }
+    // What was let go above is reaped by the kernel over a moment.
+    std::thread::sleep(std::time::Duration::from_millis(300));
+}
+
+/// Take a loop device away: `LOOP_CLR_FD` on it, which lets go of the file
+/// it was showing.
+fn detach_loop(name: &str) -> Result<()> {
+    use std::os::fd::AsRawFd;
+    let path = Path::new("/dev").join(name);
+    let file = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(&path)
+        .with_context(|| format!("open {}", path.display()))?;
+    if unsafe { libc::ioctl(file.as_raw_fd(), LOOP_CLR_FD) } == -1 {
+        return Err(std::io::Error::last_os_error()).with_context(|| format!("take away the loop device {name}"));
+    }
+    Ok(())
+}
+
+/// `LOOP_CLR_FD`: lets go of the file a loop device was showing. The
+/// request is a plain number the kernel takes as an unsigned long, but the
+/// C library of each target names its type differently.
+#[cfg(target_os = "android")]
+const LOOP_CLR_FD: libc::c_int = 0x4C01;
+#[cfg(not(target_os = "android"))]
+const LOOP_CLR_FD: libc::c_ulong = 0x4C01;
+/// Whether the process at `root`, a folder of `/proc`, stands on `point`:
+/// it runs from there, works there, keeps a file open there, or has a
+/// library or a file of it mapped. A process holds a partition by any of
+/// these, and while one of them stands the partition cannot be unmounted
+/// nor its device-mapper device taken away.
+fn runs_from(root: &Path, point: &Path) -> bool {
+    let under = |p: &Path| p.starts_with(point);
+    if std::fs::read_link(root.join("exe")).is_ok_and(|p| under(&p)) || std::fs::read_link(root.join("cwd")).is_ok_and(|p| under(&p)) {
+        return true;
+    }
+    // The files it has open.
+    if let Ok(fds) = std::fs::read_dir(root.join("fd")) {
+        for fd in fds.flatten() {
+            if std::fs::read_link(fd.path()).is_ok_and(|p| under(&p)) {
+                return true;
+            }
+        }
+    }
+    // What it has mapped: a library of the partition is enough to keep it.
+    std::fs::read_to_string(root.join("maps")).is_ok_and(|maps| maps.lines().any(|line| line.split_whitespace().nth(5).is_some_and(|p| under(Path::new(p)))))
 }

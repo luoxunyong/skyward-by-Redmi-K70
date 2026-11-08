@@ -83,6 +83,9 @@ const DM_NAME_LEN: usize = 128;
 const DM_UUID_LEN: usize = 129;
 const DM_MAX_TYPE_NAME: usize = 16;
 const DM_READONLY_FLAG: u32 = 1 << 0;
+/// The device is taken away once its last holder lets go, rather than
+/// refused while one holds it.
+const DM_DEFERRED_REMOVE: u32 = 1 << 1;
 /// Asks DM_TABLE_STATUS for each target's parameters rather than its
 /// status.
 const DM_STATUS_TABLE_FLAG: u32 = 1 << 4;
@@ -284,6 +287,16 @@ mod sys {
         call(&control()?, DM_DEV_REMOVE, io.as_mut_bytes()).with_context(|| format!("remove device-mapper device {name}"))
     }
 
+    /// Remove device `name` the way [`remove`] does, but with the deferral
+    /// the kernel offers: a device something still holds open is taken away
+    /// once the last holder lets go, rather than refused outright.
+    pub fn remove_deferred(name: &str) -> Result<()> {
+        let mut io = DmIoctl::new(name)?;
+        io.flags |= DM_DEFERRED_REMOVE;
+        call(&control()?, DM_DEV_REMOVE, io.as_mut_bytes())
+            .with_context(|| format!("remove device-mapper device {name}, deferred"))
+    }
+
     /// Give device `name`, which may be in use, `targets` as its table,
     /// read-only or not: the device is suspended while the table is
     /// swapped in, and resumes with it.
@@ -403,6 +416,10 @@ mod sys {
         bail!("this host has no device-mapper to remove {name}")
     }
 
+    pub fn remove_deferred(name: &str) -> Result<()> {
+        bail!("this host has no device-mapper to remove {name}, deferred")
+    }
+
     pub fn reload(name: &str, _targets: &[Target], _readonly: bool) -> Result<()> {
         bail!("this host has no device-mapper to reload {name}")
     }
@@ -416,7 +433,7 @@ mod sys {
     }
 }
 
-pub use sys::{create, readonly, reload, remove, status, table, table_status, target_version};
+pub use sys::{create, readonly, reload, remove, remove_deferred, status, table, table_status, target_version};
 
 #[cfg(test)]
 mod tests {

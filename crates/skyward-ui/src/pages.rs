@@ -1399,6 +1399,14 @@ const WIPING: Text = ["正在清除", "正在清除", "Wiping"];
 const WIPE_INCOMPLETE: Text = ["清除未完成", "清除未完成", "Wipe incomplete"];
 const KEEP_POWER: Text = ["清除完成前，请不要关机。", "清除完成前，請不要關機。", "Don't power off until it's wiped."];
 
+/// Said once a package's own script has run: the system it brought is made
+/// for data of its own, and the data already on the phone is not it.
+const WIPE_AFTER_PACKAGE: Text = [
+    "刷机包已刷完，请记得格式化 data 分区（清除数据），否则新系统可能无法启动。",
+    "刷機包已刷完，請記得格式化 data 分割區（清除資料），否則新系統可能無法啟動。",
+    "The package is flashed. Remember to format the data partition — wipe data — or the new system may not start.",
+];
+
 /// What rescue says once a command is done with: the computer may send
 /// another.
 const MORE_COMMANDS: Text = ["你可以继续在电脑上发送命令。", "你可以繼續在電腦上傳送指令。", "You can send more commands from the computer."];
@@ -1488,13 +1496,39 @@ fn finished(
             out.extend(hits(&next.rows, &acts));
             afterwards_of(c, cx, next.bottom, true)
         }
+        Outcome::Wrote { partitions } => {
+            let names = partitions.join(", ");
+            let detail = tr!(
+                l,
+                "已将 {names} 写入本机的分区。",
+                "已將 {names} 寫入本機的分割區。",
+                "Wrote {names} into this phone's partitions."
+            );
+            let y = widgets::list(c, t, f, top, &[standing(installed, GREEN, Icon::Install, &detail)]).bottom;
+            // A system written whole is made for data of its own, so wiping
+            // it is offered here, as after a package that installs itself.
+            let wipe = Row::new(l.pick(["清除数据", "清除資料", "Wipe data"])).icon(RED, Icon::Wipe);
+            let next = widgets::list(c, t, f, y + gap, &[restart, wipe, again]);
+            out.extend(hits(&next.rows, &[Action::RebootTo(Target::System), Action::Open(Screen::Wipe), another]));
+            let y = afterwards_of(c, cx, next.bottom, true);
+            widgets::footnote(c, t, f, y, l.pick(WIPE_AFTER_PACKAGE))
+        }
         Outcome::Ran { .. } => {
             let ran = l.pick(["安装脚本已运行完成。", "安裝指令碼已執行完成。", "The install script ran to its end."]);
             let y = widgets::list(c, t, f, top, &[standing(installed, GREEN, Icon::Install, ran)]).bottom;
-            let next = widgets::list(c, t, f, y + gap, &[restart, again]);
-            out.extend(hits(&next.rows, &[Action::RebootTo(Target::System), another]));
+            // A package that flashes a whole system usually wants the data
+            // it left behind gone before that system starts, so wiping it is
+            // offered here, off the same page.
+            let wipe = Row::new(l.pick(["清除数据", "清除資料", "Wipe data"])).icon(RED, Icon::Wipe);
+            let next = widgets::list(c, t, f, y + gap, &[restart, wipe, again]);
+            out.extend(hits(&next.rows, &[Action::RebootTo(Target::System), Action::Open(Screen::Wipe), another]));
             let y = reflashed(c, cx, next.bottom);
             let y = afterwards_of(c, cx, y, true);
+            // Said over the script's own output, which is the last thing on
+            // the page: a package of this kind is made for a system whose
+            // data is not the one on the phone, and starting it on that data
+            // leaves it unable to start at all.
+            let y = widgets::footnote(c, t, f, y, l.pick(WIPE_AFTER_PACKAGE));
             script_output(c, cx, y, rows)
         }
         Outcome::Cancelled => {

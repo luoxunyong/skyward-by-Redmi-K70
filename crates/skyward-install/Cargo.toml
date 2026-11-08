@@ -21,6 +21,9 @@ skyward-block = { path = "../skyward-block" }
 skyward-config = { path = "../skyward-config" }
 skyward-info = { path = "../skyward-info" }
 skyward-vab = { path = "../skyward-vab" }
+unpayload = { version = "0.1.1", default-features = false }
+bzip2 = "0.6"
+liblzma = { version = "0.4", default-features = false, features = ["static"] }
 x509-cert = "0.2.5"
 zerocopy = { version = "0.8.63", features = ["derive"] }
 zip = { version = "8.6.0", default-features = false, features = ["deflate-flate2-zlib-rs"] }

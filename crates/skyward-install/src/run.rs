@@ -13,6 +13,7 @@ use crate::image::{self, ImageKind};
 use crate::keep::Kept;
 use crate::ota::{self, Log, Status};
 use crate::package::{self, Build, Package, Phone, Update};
+use crate::payload;
 use crate::script::{self, Bar, Request};
 use crate::signature::{self, Verdict};
 use crate::{Command, Event, Failure, Options, Outcome, Reflash, Refusal, Stage, ENGINE_LOG, SCRIPT_LOG};
@@ -444,12 +445,72 @@ fn conclude(done: Done, served: Result<Option<Fault>>, origin: Origin) -> Outcom
     }
 }
 
+/// Write the partitions a package carries whole, where it carries them so;
+/// `None` when it is a delta the phone's own update engine puts together.
+fn write_whole_payload<S>(ctx: &mut Context, mount: &Mount<S>, update: &Update) -> Result<Option<Vec<String>>> {
+    let payload = match payload::open(fuse::PACKAGE) {        Ok(payload) => payload,
+        Err(e) => {
+            let _ = kmsg(&format!("install: the package's payload does not read ({e:#}); the update engine takes it"));
+            return Ok(None);
+        }
+    };
+    if !payload::is_whole_image(&payload) {
+        return Ok(None);
+    }
+    let slot = skyward_vab::current_slot()?.context("not an A/B phone")?;
+    let dir = Path::new(skyward_block::BY_NAME);
+    let targets: Vec<payload::Target> = payload
+        .partitions()
+        .iter()
+        .map(|p| payload::Target { partition: p.partition_name.clone(), device: image::device(dir, &p.partition_name, slot) })
+        .filter(|t| t.device.try_exists().unwrap_or(false))
+        .collect();
+    if targets.is_empty() {
+        return Ok(None);
+    }
+    let held: Vec<String> = targets.iter().map(|t| t.partition.clone()).collect();
+    let _ = kmsg(&format!("install: the package carries {held:?} whole, and this writes them"));
+    if ctx.shared.cancelled() {
+        return Ok(Some(Vec::new()));
+    }
+    ctx.send(Event::Installing { version: update.version().map(str::to_string) });
+    let kept = hold(ctx, slot)?;
+    // Moving off the installed system before it is written over: a mount
+    // that will not come off is told of and gone on with, since the
+    // partitions this package writes are named by it, not found through
+    // what is mounted.
+    if let Err(e) = detach_once(ctx) {
+        let _ = kmsg(&format!("install: not everything moved off the installed system: {e:#}"));
+    }
+    let wrote = payload::write_partitions(
+        &payload,
+        &payload::package_file(fuse::PACKAGE)?,
+        update.payload_offset,
+        &targets,
+        &mut |done, total| ctx.send(Event::Progress(Stage::Writing { done, total })),
+    )?;
+    if let Some(kept) = &kept {
+        reflash(ctx, kept, skyward_vab::boot::next_slot().context("ask which slot starts next"), slot);
+    }
+    Ok(Some(wrote))
+}
+
 fn install<S>(ctx: &mut Context, mount: &Mount<S>, size: u64) -> Result<Done> {
     let file = File::open(fuse::PACKAGE).context("open the package")?;
     let package = package::identify(BufReader::with_capacity(1 << 16, file))?;
     let _ = kmsg(&format!("install: {}", describe(&package)));
     match package {
-        Package::Update(update) => update_system(ctx, mount, &update),
+        Package::Update(update) => {
+            // A package whose partitions are whole images is written here,
+            // without the phone's update engine: such a package is made to
+            // be flashed outright, and what the engine is for — putting a
+            // delta together from the system already on the phone — is not
+            // what it holds.
+            if let Some(written) = write_whole_payload(ctx, mount, &update)? {
+                return Ok(Done::Decided(Outcome::Wrote { partitions: written }));
+            }
+            update_system(ctx, mount, &update)
+        }
         // The system asks for packages that install themselves, as Android's
         // own recovery takes nothing else; an image needs someone to say
         // where it goes.
@@ -543,7 +604,7 @@ fn update_system<S>(ctx: &mut Context, mount: &Mount<S>, update: &Update) -> Res
     Ok(match code? {
         0 => {
             if let Some(kept) = &kept {
-                reflash(ctx, kept, Ok(slot.other()));
+                reflash(ctx, kept, Ok(slot.other()), slot);
             }
             Done::Decided(Outcome::Installed { slot: slot.other(), wipe })
         }
@@ -568,8 +629,25 @@ fn hold(ctx: &Context, current: Slot) -> Result<Option<Kept>> {
 /// Write this recovery back into the recovery partitions the install wrote
 /// over and into that of `next`, the slot that starts next, telling the
 /// screen how far it is and then how it went.
-fn reflash(ctx: &Context, kept: &Kept, next: Result<Slot>) {
-    let slots = match next.and_then(|next| kept.wanted(next)) {
+/// Write this recovery back into the recovery partitions the install wrote
+/// over and into that of `next`, the slot that starts next, telling the
+/// screen how far it is and then how it went.
+///
+/// A boot control that cannot be asked — the phone's own boot service is
+/// gone, as it is once a package has written over the partitions it runs
+/// from — leaves `next` unknown, and `current` stands in for it: the slot
+/// this recovery runs from is the one that starts next unless something
+/// said otherwise, and writing this recovery into both slots is better than
+/// writing it into neither.
+fn reflash(ctx: &Context, kept: &Kept, next: Result<Slot>, current: Slot) {
+    let next = match next {
+        Ok(slot) => slot,
+        Err(e) => {
+            let _ = kmsg(&format!("install: which slot starts next is not known ({e:#}); this one is taken instead"));
+            current
+        }
+    };
+    let slots = match kept.wanted(next) {
         Ok(slots) if slots.is_empty() => return,
         Ok(slots) => slots,
         Err(e) => return ctx.send(Event::Reflashed(Reflash::Failed(format!("{e:#}")))),
@@ -784,12 +862,32 @@ fn run_script(ctx: &mut Context, size: u64, served: impl Fn() -> u64) -> Result<
     extract_script()?;
     shell_at_sbin()?;
     let kept = hold(ctx, slot)?;
-    detach_once(ctx)?;
-    // While an update is in flight, the slot's partitions in super are its
-    // and stay unmapped.
-    let mapped = match skyward_vab::snapshot_state()? {
-        SnapshotState::None => skyward_vab::map_slot(slot)?,
-        state => {
+    // A package that lays super out again maps its partitions itself, and
+    // cannot while this recovery holds them: it asks for the layout to be
+    // rewritten, which takes every mapping off first, and a mapping left
+    // standing fails that and stops the whole install. So a package of that
+    // kind is given the slot unmapped and does the mapping its own way —
+    // and nothing on the slot is held in memory for it either, since what
+    // is held keeps its partition from being unmapped at all.
+    let remakes_super = lays_super_out_again();
+    if remakes_super {
+        // The mounts this recovery keeps to read the installed system are
+        // let go entirely, their device-mapper devices with them, before
+        // anything holds a file on them.
+        if let Err(e) = skyward_vab::release_whole(slot) {
+            let _ = kmsg(&format!("install: the slot's partitions could not all be let go: {e:#}"));
+        }
+        let _ = kmsg("install: the package lays super out again, so nothing of the slot is held");
+    } else {
+        detach_once(ctx)?;
+    }
+    let mapped = match (skyward_vab::snapshot_state()?, remakes_super) {
+        (SnapshotState::None, false) => skyward_vab::map_slot(slot)?,
+        (SnapshotState::None, true) => {
+            let _ = kmsg("install: the package lays super out again, so the slot stays unmapped for it");
+            SlotMaps::default()
+        }
+        (state, _) => {
             let _ = kmsg(&format!("install: the slot's partitions stay unmapped while an update is in flight ({state:?})"));
             SlotMaps::default()
         }
@@ -803,7 +901,7 @@ fn run_script(ctx: &mut Context, size: u64, served: impl Fn() -> u64) -> Result<
     // the recovery of the slot that starts next, which a package that
     // installs to the other slot switches to.
     if let Some(kept) = &kept {
-        reflash(ctx, kept, skyward_vab::boot::next_slot().context("ask which slot starts next"));
+        reflash(ctx, kept, skyward_vab::boot::next_slot().context("ask which slot starts next"), slot);
     }
     let (code, wipe_cache) = ran?;
     Ok(Done::Script { code, wipe_cache })
@@ -841,6 +939,42 @@ fn extract_script() -> Result<()> {
     let mut out = OpenOptions::new().write(true).create_new(true).open(BINARY).with_context(|| format!("make {BINARY}"))?;
     io::copy(&mut script, &mut out).with_context(|| format!("write {BINARY}"))?;
     out.set_permissions(fs::Permissions::from_mode(0o755)).with_context(|| format!("make {BINARY} runnable"))
+}
+
+/// Whether the package being served lays super out again, its install
+/// script asking for a new layout rather than writing into the one the
+/// phone has: such a package maps the slot's partitions itself, and cannot
+/// while this recovery holds them.
+///
+/// The script says so by name: it asks for the layout to be rewritten, or
+/// maps a partition of super to write into it, both of which recoveries
+/// that install these packages give it.
+fn lays_super_out_again() -> bool {
+    let read = || -> Result<String> {
+        let zip = File::open(fuse::PACKAGE).context("open the package")?;
+        let mut zip = zip::ZipArchive::new(BufReader::new(zip)).context("read the zip directory")?;
+        let mut script = zip.by_name(package::UPDATER_SCRIPT).context("open the updater script")?;
+        let mut text = String::new();
+        script.take(1 << 20).read_to_string(&mut text).context("read the updater script")?;
+        Ok(text)
+    };
+    match read() {
+        Ok(text) => {
+            let remake = text.contains("update_dynamic_partitions");
+            let maps = text.contains("map_partition(");
+            if remake || maps {
+                let _ = kmsg(&format!(
+                    "install: the package lays super out again ({}{})",
+                    if remake { "update_dynamic_partitions" } else { "" },
+                    if maps { " map_partition" } else { "" }
+                ));
+            }
+            remake || maps
+        }
+        // A package with no script of that kind is installed the way every
+        // other one is: the slot mapped for it.
+        Err(_) => false,
+    }
 }
 
 /// Give scripts written for other recoveries the shell they start with.

@@ -8,12 +8,18 @@ pub const PROGRAM: &str = "/system/bin/update_engine_sideload";
 
 /// Its arguments for `update`, read from the file `package`; it writes
 /// its status lines to `status_fd`.
+///
+/// A package older than the system on the phone is applied too: going back
+/// is what whoever flashed it asked for, and this recovery has already
+/// checked the package against the phone itself. Without the flag the
+/// phone's own program turns such a package down before writing anything.
 pub fn arguments(package: &str, update: &Update, status_fd: i32) -> Vec<String> {
     vec![
         format!("--payload=file://{package}"),
         format!("--offset={}", update.payload_offset),
         format!("--headers={}", update.properties),
         format!("--status_fd={status_fd}"),
+        "--allow-downgrade".to_string(),
     ]
 }
 
@@ -127,6 +133,9 @@ mod tests {
                 "--offset=2365",
                 "--headers=FILE_HASH=abc=\nFILE_SIZE=7103041280\n",
                 "--status_fd=9",
+                // A package older than the system on the phone is applied
+                // too: the phone's own program turns one down without it.
+                "--allow-downgrade",
             ]
         );
     }

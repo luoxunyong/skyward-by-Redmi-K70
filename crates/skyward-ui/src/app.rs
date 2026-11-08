@@ -1583,6 +1583,12 @@ pub struct Pace {
 }
 
 impl Pace {
+    /// Take the moment the step began, `now`, so the time it has been at its
+    /// work runs from the first frame, before anything of it has come in.
+    pub fn start(&mut self, now: u64) {
+        *self = Pace { started: Some(now), ..Pace::default() };
+    }
+
     /// Take how far a step is, `done` of `total`, at `now`; `total` of
     /// nothing for a step whose size is not known, which still moves on at a
     /// rate and still tells how long it has been at it.
@@ -1675,6 +1681,11 @@ impl Pace {
     /// how much of it is left is known.
     pub fn known(&self) -> bool {
         self.started.is_some()
+    }
+
+    /// The time the step has been at its work, in milliseconds.
+    pub fn elapsed_ms(&self) -> u64 {
+        self.elapsed
     }
 
     /// What the step was first taken at, and the bytes it has done and has
@@ -2934,7 +2945,20 @@ impl App {
         };
         let blink = self.blink_at(now).filter(|_| self.display_on).map(|(_, next)| next);
         let chord = self.chord.map(|(_, at)| at + CHORD_MS);
-        [self.toast.as_ref().map(|t| t.1), easing, self.idle_due(), held, repeat, blink, darkens, chord].into_iter().flatten().min()
+        // A step of an install counts the seconds it has been at its work on
+        // the page, so the page is woken as the next one turns over: without
+        // this the loop would sleep a whole second at a time and the count
+        // would stand still between one word of the script and the next. A
+        // word the page has to say comes first, and is not put off by it.
+        let ticking = self.toast.is_none() && self.state.install.is_under_way() && self.state.pace.known();
+        let ticking = ticking.then(|| {
+            let next = (self.state.pace.elapsed_ms() / 1000 + 1) * 1000;
+            self.state.pace.started_at().map_or(now + 1000, |at| at + next)
+        });
+        [self.toast.as_ref().map(|t| t.1), easing, self.idle_due(), held, repeat, blink, darkens, chord, ticking]
+            .into_iter()
+            .flatten()
+            .min()
     }
 
     /// Whether a text field's cursor shows at `now`, and when it next turns;
@@ -2978,9 +3002,15 @@ impl App {
         // The time a step has been at its work passes even where nothing of
         // the work has come in since: a script that reads and writes a
         // partition for a minute says nothing of it meanwhile, and the page
-        // would stand still.
+        // would stand still. The page is drawn again as the second it shows
+        // turns over, so the clock on it never stops between one word of the
+        // script and the next.
         if self.state.install.is_under_way() {
+            let shown = self.state.pace.elapsed();
             self.state.pace.still_going(now);
+            if self.state.pace.elapsed() != shown {
+                self.refresh();
+            }
         }
         // The key waiting for its partner in a screenshot, left alone long
         // enough, does what it does alone.
@@ -4942,6 +4972,10 @@ impl App {
             Event::Running => {
                 *install = Install::Scripting { stage: None, running: true };
                 self.state.script_output.clear();
+                // The clock starts with the script, so the time it has been
+                // at its work runs from the first frame, whatever the script
+                // says of its progress afterwards.
+                self.state.pace.start(now);
                 // The page follows the output from its first line, and is
                 // brought back to the top once the script is done.
                 follow = Some(true);
