@@ -143,6 +143,7 @@ fn make_writable(device: &Path) {
 }
 
 /// Write `update`'s image into `device`, which holds `size` bytes of it.
+#[allow(clippy::too_many_arguments)]
 fn write_one(
     payload: &Payload,
     package: &File,
@@ -207,6 +208,7 @@ fn write_one(
 
 /// Write `take` bytes made from the operation data at `data`, which is
 /// `len` bytes of the package at `offset` in the payload, into `out`.
+#[allow(clippy::too_many_arguments)]
 fn write_stretch(
     package: &File,
     data: (u64, u64),

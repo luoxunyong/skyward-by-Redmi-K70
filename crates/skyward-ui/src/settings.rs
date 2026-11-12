@@ -233,6 +233,7 @@ fn picked<const N: usize>(kept: &[String], all: &[&str; N]) -> [bool; N] {
 
 /// What the settings file held as the recovery started.
 #[derive(Debug, Clone, PartialEq)]
+#[allow(clippy::large_enum_variant)]
 pub enum Kept {
     Settings(Settings),
     /// No settings: no file, or one that does not read as settings.

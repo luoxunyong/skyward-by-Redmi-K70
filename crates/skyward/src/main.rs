@@ -32,6 +32,8 @@ mod services;
 #[cfg(target_os = "android")]
 mod settings;
 #[cfg(target_os = "android")]
+mod systems;
+#[cfg(target_os = "android")]
 mod ui;
 #[cfg(target_os = "android")]
 mod updates;
@@ -121,8 +123,8 @@ enum Cmd {
         #[arg(long, default_value = "/dev/dri/card0")]
         card: String,
     },
-    /// Play the vibration motor's click once, saying how strongly and for
-    /// how long.
+    /// Play the vibration motor's click once, or the ticks of the screen
+    /// going off by the power key, saying how strongly and for how long.
     #[cfg(target_os = "android")]
     Haptic {
         #[arg(long, default_value = "/skyward/device.toml")]
@@ -131,6 +133,9 @@ enum Cmd {
         /// right.
         #[arg(long, default_value_t = skyward_ui::app::SLIDER_START)]
         position: f32,
+        /// Play the ticks of the screen going off instead of the click.
+        #[arg(long)]
+        ticks: bool,
     },
     /// Save what the panel shows, as raw RGBA files cap-000.rgba onwards.
     #[cfg(target_os = "android")]
@@ -284,9 +289,9 @@ fn main() -> Result<()> {
             Ok(())
         }
         #[cfg(target_os = "android")]
-        Cmd::Haptic { config, position } => {
+        Cmd::Haptic { config, position, ticks } => {
             let haptics = DeviceConfig::load(&config)?.haptics.context("the configuration describes no vibration motor")?;
-            haptics::probe(&haptics, position)
+            haptics::probe(&haptics, position, ticks)
         }
         #[cfg(target_os = "android")]
         Cmd::Capture { out, count, interval, card } => {
@@ -723,6 +728,16 @@ fn recovery() -> Result<()> {
             Ok(ms) => skyward_sys::kmsg(&format!("clock set to {} ms from the RTC and persist", ms))?,
             Err(e) => skyward_sys::kmsg(&format!("clock not set: {e:#}"))?,
         }
+        // The kernel starts every core at its top frequency, and keeps idle
+        // ones from powering down, until the phone's own system boots and
+        // changes that; left so, the phone drains its battery with the
+        // screen off. The recovery works either way, so a failure goes to
+        // the kernel log.
+        #[cfg(target_os = "android")]
+        match skyward_sys::cpu::run_as_system() {
+            Ok(done) => skyward_sys::kmsg(&format!("the CPUs run as the system runs them: {}", done.join(", ")))?,
+            Err(e) => skyward_sys::kmsg(&format!("the CPUs run as the kernel started them: {e:#}"))?,
+        }
         #[cfg(target_os = "android")]
         {
             use skyward_ui::app::Screen;
@@ -823,6 +838,14 @@ fn identify(path: &Path) -> Result<()> {
         }
         Package::Image(kind) => println!("{kind:?}, for {}", kind.partitions().join(" or ")),
         Package::Script => println!("a zip that installs itself with a script"),
+        Package::System(c) => {
+            println!("the system {} {} ({}), to install beside the installed one", c.manifest.name, c.manifest.version, c.manifest.id);
+            println!("a boot image of {} bytes, a root image of {} bytes ({}), starting {}", c.boot, c.root, c.manifest.filesystem, c.manifest.init);
+            println!("its root takes at least {} bytes", c.least());
+            if c.init_boot {
+                println!("it brings its own init_boot image");
+            }
+        }
         Package::Unknown => println!("nothing this recovery installs"),
     }
     Ok(())

@@ -101,6 +101,9 @@ recovery = "58e508fe836d9f469e76440329d180a6556ed13ee42eb975a19124e7cc90c987"
 
 [haptics]
 click = 0
+# The driver says the motor's resonant frequency here; the ticks of the
+# screen going off are made at it.
+resonance = "/sys/class/qcom-haptics/lra_frequency_hz"
 strength = { lightest = 0.5, strongest = 1.0 }
 # The slider writes the motor's top voltage the way the phone's own
 # settings do, through the driver's file they use.

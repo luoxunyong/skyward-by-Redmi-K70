@@ -8,7 +8,12 @@ use std::time::{Duration, Instant};
 pub mod bcb;
 pub mod clock;
 pub mod control;
+pub mod cpu;
 pub mod settings;
+#[cfg(target_os = "android")]
+pub mod sleep;
+#[cfg(target_os = "android")]
+pub mod uevent;
 pub mod ueventd;
 pub mod usb;
 
