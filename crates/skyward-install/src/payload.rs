@@ -10,17 +10,28 @@
 //! Android compresses them, or a stretch of nothing. They are read out of the
 //! payload as they are needed and written straight into the partition, so a
 //! package far larger than the phone's memory is installed all the same.
+//!
+//! Every operation that carries data is checked against the hash its
+//! manifest gives before a byte of it is written, and its stretches are
+//! checked against the partition's size first: a payload whose offsets or
+//! data do not say what they should stops the install rather than writing
+//! something else over a partition.
 
 use anyhow::{bail, ensure, Context, Result};
+use sha2::{Digest, Sha256};
 use skyward_vab::Slot;
 use std::fs::{File, OpenOptions};
-use std::io::{BufReader, Read, Seek, SeekFrom, Write};
+use std::io::{BufReader, Cursor, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
-use unpayload::metadata::{InstallOperation, OperationType, PartitionUpdate};
+use unpayload::metadata::{Extent, InstallOperation, OperationType, PartitionUpdate};
 use unpayload::Payload;
 
 /// How much of an operation's data is read at a time.
 const CHUNK: usize = 1 << 20;
+
+/// The most operation data one operation may name: the payload is read a
+/// piece at a time, and a length past this is a manifest gone wrong.
+const MOST_OPERATION_DATA: u64 = 64 << 20;
 
 /// What a partition of the payload holds, and where its bytes are written.
 #[derive(Debug, Clone)]
@@ -117,6 +128,41 @@ pub fn write_partitions(
     Ok(written)
 }
 
+/// Check every operation of `payload` without writing anything: its data
+/// has to lie inside the payload, hash to what the manifest says, and its
+/// stretches have to lie inside the image the manifest sizes. Says nothing
+/// of the phone: what it checks is the package, and an install that would
+/// write it.
+pub fn check(payload: &Payload, package: &File, base: u64) -> Result<()> {
+    let data_offset = payload.data_offset();
+    let data_area = payload.size().checked_sub(data_offset).context("the payload's data begins past its end")?;
+    let block = payload.block_size() as u64;
+    let mut source = package.try_clone().context("share the package's handle")?;
+    for update in payload.partitions() {
+        let size = image_size(update);
+        for op in operations(update) {
+            let kind = OperationType::try_from(op.r#type).with_context(|| format!("operation kind {}", op.r#type))?;
+            match kind {
+                OperationType::Replace | OperationType::ReplaceBz | OperationType::ReplaceXz | OperationType::ReplaceZstd => {
+                    operation_data(&mut source, base, data_offset, data_area, op)?;
+                }
+                OperationType::Zero | OperationType::Discard => {}
+                other => bail!("{} is made by {other:?}, which a whole image does not use", update.partition_name),
+            }
+            for extent in &op.dst_extents {
+                let start = extent.start_block.context("an extent with no start block")? * block;
+                let take = extent.num_blocks.context("an extent with no block count")? * block;
+                ensure!(
+                    start.checked_add(take).is_some_and(|end| size == 0 || end <= size),
+                    "{} lays {take} bytes out at {start}, past its image of {size}",
+                    update.partition_name
+                );
+            }
+        }
+    }
+    Ok(())
+}
+
 /// `BLKROSET`: marks a block device read-only, or writable again when what
 /// follows the request says zero. The request is a plain number the kernel
 /// takes as an unsigned long, but the C library of each target names its
@@ -164,40 +210,40 @@ fn write_one(
     ensure!(size <= holds, "{} holds {holds} bytes, and the image is {size}", device.display());
     file.seek(SeekFrom::Start(0)).with_context(|| format!("rewind {}", device.display()))?;
 
+    let data_offset = payload.data_offset();
+    let data_area = payload.size().checked_sub(data_offset).context("the payload's data begins past its end")?;
     let block = payload.block_size() as u64;
+    let mut source = package.try_clone().context("share the package's handle")?;
     for op in operations(update) {
         let kind = OperationType::try_from(op.r#type).with_context(|| format!("operation kind {}", op.r#type))?;
         match kind {
             OperationType::Replace | OperationType::ReplaceBz | OperationType::ReplaceXz | OperationType::ReplaceZstd => {
-                let at = op.data_offset.context("an operation with no data offset")?;
-                let len = op.data_length.context("an operation with no data length")?;
-                let data = (base + payload.data_offset() + at, len);
-                for extent in &op.dst_extents {
-                    let start = extent.start_block.context("an extent with no start block")? * block;
-                    let take = extent.num_blocks.context("an extent with no block count")? * block;
-                    file.seek(SeekFrom::Start(start)).with_context(|| format!("seek in {}", device.display()))?;
-                    let wrote = write_stretch(package, data, kind, &mut file, take, done, total, progress)
-                        .with_context(|| format!("write {} at {start}", device.display()))?;
-                    ensure!(wrote == take, "{} takes {wrote} bytes where {take} were laid out", update.partition_name);
-                }
+                let data = operation_data(&mut source, base, data_offset, data_area, op)?;
+                let wrote = match kind {
+                    OperationType::Replace => {
+                        let mut from = Cursor::new(data.as_slice());
+                        write_extents(&mut from, &mut file, &op.dst_extents, block, holds, &update.partition_name, done, total, progress)
+                    }
+                    OperationType::ReplaceBz => {
+                        let mut from = bzip2::bufread::BzDecoder::new(BufReader::new(Cursor::new(data.as_slice())));
+                        write_extents(&mut from, &mut file, &op.dst_extents, block, holds, &update.partition_name, done, total, progress)
+                    }
+                    OperationType::ReplaceXz => {
+                        let mut from = liblzma::bufread::XzDecoder::new(BufReader::new(Cursor::new(data.as_slice())));
+                        write_extents(&mut from, &mut file, &op.dst_extents, block, holds, &update.partition_name, done, total, progress)
+                    }
+                    OperationType::ReplaceZstd => {
+                        let mut from = zstd::stream::read::Decoder::new(Cursor::new(data.as_slice())).context("read the compressed operation")?;
+                        write_extents(&mut from, &mut file, &op.dst_extents, block, holds, &update.partition_name, done, total, progress)
+                    }
+                    _ => unreachable!("the operation kinds are matched above"),
+                };
+                wrote.with_context(|| format!("write {} at the operation's stretches", device.display()))?;
             }
             // A whole image has nothing there to copy from and nothing to
             // keep: the stretch is written as nothing.
             OperationType::Zero | OperationType::Discard => {
-                for extent in &op.dst_extents {
-                    let start = extent.start_block.context("an extent with no start block")? * block;
-                    let take = extent.num_blocks.context("an extent with no block count")? * block;
-                    file.seek(SeekFrom::Start(start)).with_context(|| format!("seek in {}", device.display()))?;
-                    let zeros = vec![0u8; CHUNK.min(take as usize)];
-                    let mut left = take;
-                    while left > 0 {
-                        let n = left.min(zeros.len() as u64) as usize;
-                        file.write_all(&zeros[..n]).with_context(|| format!("write {}", device.display()))?;
-                        left -= n as u64;
-                        *done += n as u64;
-                        progress(*done, total);
-                    }
-                }
+                write_zeroes(&mut file, &op.dst_extents, block, holds, &update.partition_name, done, total, progress)?;
             }
             other => bail!("{} is made by {other:?}, which a whole image does not use", update.partition_name),
         }
@@ -206,97 +252,132 @@ fn write_one(
     Ok(())
 }
 
-/// Write `take` bytes made from the operation data at `data`, which is
-/// `len` bytes of the package at `offset` in the payload, into `out`.
-#[allow(clippy::too_many_arguments)]
-fn write_stretch(
-    package: &File,
-    data: (u64, u64),
-    kind: OperationType,
-    out: &mut File,
-    take: u64,
-    done: &mut u64,
-    total: u64,
-    progress: &mut dyn FnMut(u64, u64),
-) -> Result<u64> {
-    match kind {
-        OperationType::Replace => {
-            let mut reader = PayloadReader::new(package, data)?;
-            copy_out(&mut reader, out, take, done, total, progress)
-        }
-        OperationType::ReplaceBz => {
-            let reader = PayloadReader::new(package, data)?;
-            let mut decoder = bzip2::bufread::BzDecoder::new(BufReader::new(reader));
-            copy_out(&mut decoder, out, take, done, total, progress)
-        }
-        OperationType::ReplaceXz => {
-            let reader = PayloadReader::new(package, data)?;
-            let mut decoder = liblzma::bufread::XzDecoder::new(BufReader::new(reader));
-            copy_out(&mut decoder, out, take, done, total, progress)
-        }
-        OperationType::ReplaceZstd => {
-            let reader = PayloadReader::new(package, data)?;
-            let mut decoder = zstd::stream::read::Decoder::new(BufReader::new(reader)).context("read the compressed operation")?;
-            copy_out(&mut decoder, out, take, done, total, progress)
-        }
-        other => bail!("{other:?} is not an operation this writes as it stands"),
+/// The data of `op`, read where the payload says it is: `base` is where the
+/// payload starts in `package`, `data_offset` where its operation data
+/// starts in the payload, and `data_area` how much data it has.
+///
+/// The bytes are checked against the hash the manifest gives before they are
+/// handed back, so an offset that points somewhere else stops the install
+/// instead of writing another operation's data over a partition.
+fn operation_data(package: &mut File, base: u64, data_offset: u64, data_area: u64, op: &InstallOperation) -> Result<Vec<u8>> {
+    let at = op.data_offset.context("an operation with no data offset")?;
+    let len = op.data_length.context("an operation with no data length")?;
+    ensure!(len <= MOST_OPERATION_DATA, "an operation names {len} bytes of data, more than this reads at once");
+    ensure!(
+        at.checked_add(len).is_some_and(|end| end <= data_area),
+        "an operation's data ({at} + {len}) runs past the payload's {data_area} bytes of data"
+    );
+    let start = base
+        .checked_add(data_offset)
+        .and_then(|data| data.checked_add(at))
+        .context("the operation's data begins past the end of what can be read")?;
+    let mut data = vec![0u8; len as usize];
+    package.seek(SeekFrom::Start(start)).with_context(|| format!("seek to the operation's data at {start}"))?;
+    package.read_exact(&mut data).context("read the operation's data")?;
+    if let Some(want) = &op.data_sha256_hash {
+        let got = Sha256::digest(&data);
+        ensure!(
+            got.as_slice() == want.as_slice(),
+            "the operation's data does not hash to what the payload says: {} instead of {}",
+            hex(&got),
+            hex(want)
+        );
     }
+    Ok(data)
 }
 
-/// Copy up to `take` bytes of `from` into `out`, and give how many there
-/// were.
-fn copy_out(
+/// Write what `from` gives into the stretches `extents` lay out in `out`,
+/// and nothing more: every stretch is checked against the partition's
+/// `holds` bytes before a byte is written, and the data has to give exactly
+/// the bytes the stretches name.
+#[allow(clippy::too_many_arguments)]
+fn write_extents(
     from: &mut impl Read,
     out: &mut File,
-    take: u64,
+    extents: &[Extent],
+    block: u64,
+    holds: u64,
+    partition: &str,
     done: &mut u64,
     total: u64,
     progress: &mut dyn FnMut(u64, u64),
-) -> Result<u64> {
+) -> Result<()> {
+    let mut named = 0u64;
+    for extent in extents {
+        let start = extent.start_block.context("an extent with no start block")? * block;
+        let take = extent.num_blocks.context("an extent with no block count")? * block;
+        ensure!(
+            start.checked_add(take).is_some_and(|end| end <= holds),
+            "{partition} lays {take} bytes out at {start}, past the partition's {holds}"
+        );
+        named = named.checked_add(take).context("an operation lays out more bytes than can be counted")?;
+    }
     let mut buf = vec![0u8; CHUNK];
-    let mut wrote = 0u64;
-    while wrote < take {
-        let want = (take - wrote).min(buf.len() as u64) as usize;
-        let n = from.read(&mut buf[..want]).context("read the operation's data")?;
-        if n == 0 {
-            break;
+    let mut left = named;
+    for extent in extents {
+        let start = extent.start_block.context("an extent with no start block")? * block;
+        let mut take = extent.num_blocks.context("an extent with no block count")? * block;
+        out.seek(SeekFrom::Start(start)).with_context(|| format!("seek in {partition} at {start}"))?;
+        while take > 0 {
+            let want = take.min(buf.len() as u64) as usize;
+            let n = from.read(&mut buf[..want]).context("read the operation's data")?;
+            ensure!(n > 0, "{partition} names {named} bytes, and its data ends {left} bytes early");
+            out.write_all(&buf[..n]).with_context(|| format!("write {partition}"))?;
+            take -= n as u64;
+            left -= n as u64;
+            *done += n as u64;
+            progress(*done, total);
         }
-        out.write_all(&buf[..n]).context("write the partition")?;
-        wrote += n as u64;
-        *done += n as u64;
-        progress(*done, total);
     }
-    Ok(wrote)
+    let mut extra = [0u8; 1];
+    ensure!(
+        from.read(&mut extra).context("read the operation's end")? == 0,
+        "{partition} names {named} bytes, and its data holds more"
+    );
+    Ok(())
 }
 
-/// The bytes of one operation's data, read out of the payload a stretch at a
-/// time.
-struct PayloadReader {
-    file: File,
-    at: u64,
-    left: u64,
-}
-
-impl PayloadReader {
-    /// The data at `data` of the payload in `file`, a handle of its own on
-    /// the package.
-    fn new(file: &File, data: (u64, u64)) -> Result<PayloadReader> {
-        Ok(PayloadReader { file: file.try_clone().context("share the package's handle")?, at: data.0, left: data.1 })
-    }
-}
-
-impl Read for PayloadReader {
-    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
-        if self.left == 0 {
-            return Ok(0);
+/// Write the stretches `extents` lay out in `out` as nothing, after checking
+/// each against the partition's `holds` bytes.
+#[allow(clippy::too_many_arguments)]
+fn write_zeroes(
+    out: &mut File,
+    extents: &[Extent],
+    block: u64,
+    holds: u64,
+    partition: &str,
+    done: &mut u64,
+    total: u64,
+    progress: &mut dyn FnMut(u64, u64),
+) -> Result<()> {
+    let zeros = vec![0u8; CHUNK];
+    for extent in extents {
+        let start = extent.start_block.context("an extent with no start block")? * block;
+        let mut take = extent.num_blocks.context("an extent with no block count")? * block;
+        ensure!(
+            start.checked_add(take).is_some_and(|end| end <= holds),
+            "{partition} lays {take} bytes out at {start}, past the partition's {holds}"
+        );
+        out.seek(SeekFrom::Start(start)).with_context(|| format!("seek in {partition} at {start}"))?;
+        while take > 0 {
+            let n = take.min(zeros.len() as u64) as usize;
+            out.write_all(&zeros[..n]).with_context(|| format!("write {partition}"))?;
+            take -= n as u64;
+            *done += n as u64;
+            progress(*done, total);
         }
-        let want = (buf.len() as u64).min(self.left) as usize;
-        self.file.seek(SeekFrom::Start(self.at))?;
-        let n = self.file.read(&mut buf[..want])?;
-        self.at += n as u64;
-        self.left -= n as u64;
-        Ok(n)
     }
+    Ok(())
+}
+
+/// A short lowercase hex form of `bytes`, for saying what differs.
+fn hex(bytes: &[u8]) -> String {
+    let mut said = String::with_capacity(bytes.len() * 2);
+    for byte in bytes {
+        use std::fmt::Write as _;
+        let _ = write!(said, "{byte:02x}");
+    }
+    said
 }
 
 /// The partitions of `targets` that `slot` names on the phone: each
