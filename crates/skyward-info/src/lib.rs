@@ -34,6 +34,8 @@ pub struct DeviceInfo {
     /// Marketed screen diagonal in inches.
     pub screen: Option<f32>,
     pub os_version: Option<String>,
+    /// The maker's name for the system the version belongs to.
+    pub os_name: Option<OsName>,
     pub android: Option<String>,
     /// The locale the installed system is built to start in, such as
     /// `zh-CN`.
@@ -45,6 +47,16 @@ pub struct DeviceInfo {
     pub slot: Option<Slot>,
     pub snapshot: SnapshotState,
     pub boot: Boot,
+}
+
+/// The makers' names for their systems, read from the build properties the
+/// installed system carries.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OsName {
+    HyperOs,
+    Miui,
+    ColorOs,
+    Flyme,
 }
 
 /// `ro.build.version.security_patch`, a calendar date.
@@ -142,6 +154,8 @@ pub fn collect(cfg: &DeviceConfig) -> Result<DeviceInfo> {
         Some(other) => bail!("androidboot.vbmeta.device_state {other:?}"),
     };
     let system = SystemProps::current()?;
+    let os_name = system.os_name();
+    let os_version = system.os_version(cfg, os_name);
     Ok(DeviceInfo {
         // The system names the exact edition; the configured model covers a
         // system whose partitions are not mounted.
@@ -152,7 +166,8 @@ pub fn collect(cfg: &DeviceConfig) -> Result<DeviceInfo> {
         ram_kib: mem_total(&read("/proc/meminfo")?)?,
         panel: (d.width > 0 && d.height > 0).then_some((d.width, d.height)),
         screen: d.diagonal,
-        os_version: system.get(&cfg.device.os_version_prop),
+        os_version,
+        os_name,
         android: system.get("ro.build.version.release"),
         locale: system.get("ro.product.locale"),
         security_patch: system.get("ro.build.version.security_patch").map(|s| s.parse()).transpose()?,
@@ -190,6 +205,58 @@ impl SystemProps {
         match self {
             SystemProps::Running => prop(name),
             SystemProps::Installed(props) => props.get(name).cloned(),
+        }
+    }
+
+    /// Which maker's system the properties describe, by the properties each
+    /// writes, or else by the name in its display build.
+    fn os_name(&self) -> Option<OsName> {
+        // The makers that replace a Xiaomi system are read first: their
+        // builds can still carry Xiaomi's properties from the vendor side.
+        if self.get("ro.build.version.oplusrom").is_some()
+            || self.get("ro.build.version.opporom").is_some()
+            || self.get("ro.oppo.version").is_some()
+        {
+            return Some(OsName::ColorOs);
+        }
+        if self.get("ro.build.flyme.version").is_some() || self.get("ro.flyme.version").is_some() {
+            return Some(OsName::Flyme);
+        }
+        if self.get("ro.mi.os.version.incremental").is_some() || self.get("ro.mi.os.version.name").is_some() {
+            return Some(OsName::HyperOs);
+        }
+        if self.get("ro.miui.ui.version.name").is_some() {
+            return Some(OsName::Miui);
+        }
+        let display = self.get("ro.build.display.id").or_else(|| self.get("ro.build.description")).unwrap_or_default();
+        let display = display.to_ascii_lowercase();
+        if display.contains("coloros") {
+            Some(OsName::ColorOs)
+        } else if display.contains("flyme") {
+            Some(OsName::Flyme)
+        } else if display.contains("miui") {
+            Some(OsName::Miui)
+        } else if display.contains("hyperos") {
+            Some(OsName::HyperOs)
+        } else {
+            None
+        }
+    }
+
+    /// The version as the maker names it for `name`, or the configured
+    /// property where the maker is not known.
+    fn os_version(&self, cfg: &skyward_config::DeviceConfig, name: Option<OsName>) -> Option<String> {
+        match name {
+            Some(OsName::Miui) => self.get("ro.build.version.incremental").or_else(|| self.get("ro.miui.ui.version.name")),
+            Some(OsName::ColorOs) => self
+                .get("ro.build.version.oplusrom")
+                .or_else(|| self.get("ro.build.version.opporom"))
+                .or_else(|| self.get("ro.build.display.id")),
+            Some(OsName::Flyme) => self
+                .get("ro.build.flyme.version")
+                .or_else(|| self.get("ro.flyme.version"))
+                .or_else(|| self.get("ro.build.display.id")),
+            Some(OsName::HyperOs) | None => self.get(&cfg.device.os_version_prop),
         }
     }
 }
@@ -417,6 +484,25 @@ fn said_online(read: std::io::Result<String>) -> std::io::Result<bool> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn props(pairs: &[(&str, &str)]) -> SystemProps {
+        SystemProps::Installed(pairs.iter().map(|(k, v)| (k.to_string(), v.to_string())).collect())
+    }
+
+    #[test]
+    fn each_makers_system_is_named_by_its_own_properties() {
+        assert_eq!(props(&[("ro.mi.os.version.incremental", "OS3.0.1")]).os_name(), Some(OsName::HyperOs));
+        assert_eq!(props(&[("ro.miui.ui.version.name", "V14.0.5.0")]).os_name(), Some(OsName::Miui));
+        assert_eq!(props(&[("ro.build.version.oplusrom", "V15.0.0")]).os_name(), Some(OsName::ColorOs));
+        assert_eq!(props(&[("ro.build.flyme.version", "Flyme 10")]).os_name(), Some(OsName::Flyme));
+        assert_eq!(
+            props(&[("ro.mi.os.version.incremental", "OS3.0.1"), ("ro.build.version.oplusrom", "V15.0.0")]).os_name(),
+            Some(OsName::ColorOs),
+            "a Xiaomi property left in vendor does not hide ColorOS"
+        );
+        assert_eq!(props(&[("ro.build.display.id", "ColorOS 15")]).os_name(), Some(OsName::ColorOs));
+        assert_eq!(props(&[]).os_name(), None);
+    }
 
     #[test]
     fn cpulist_ranges_and_singles() {

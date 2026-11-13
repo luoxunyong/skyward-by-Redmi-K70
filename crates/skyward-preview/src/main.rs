@@ -1,6 +1,6 @@
 use anyhow::{anyhow, Result};
 use skyward_config::DeviceConfig;
-use skyward_info::{Battery, Boot, Charge, Cpu, DeviceInfo, PatchLevel, Storage};
+use skyward_info::{Battery, Boot, Charge, Cpu, DeviceInfo, OsName, PatchLevel, Storage};
 use skyward_install::{Failure, ImageKind, Outcome, Ramdisk, Reflash, Refusal, Stage};
 use skyward_net::download::{Failure as DownloadFailure, Progress};
 use skyward_net::github::{Build, Newest};
@@ -1541,6 +1541,7 @@ fn nezha(cfg: &DeviceConfig) -> DeviceInfo {
         panel: Some((cfg.display.width, cfg.display.height)),
         screen: cfg.display.diagonal,
         os_version: Some("OS4.0.4.0.XPACNXM".into()),
+        os_name: Some(OsName::HyperOs),
         android: Some("17".into()),
         locale: Some("zh-CN".into()),
         security_patch: Some(PatchLevel { year: 2026, month: 10, day: 1 }),

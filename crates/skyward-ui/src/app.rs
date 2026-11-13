@@ -7631,6 +7631,7 @@ mod tests {
             panel: Some((W, H)),
             screen: Some(6.73),
             os_version: None,
+            os_name: None,
             android: None,
             locale: None,
             security_patch: None,

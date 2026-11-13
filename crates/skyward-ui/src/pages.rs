@@ -19,7 +19,7 @@ use crate::theme::Theme;
 use crate::tr;
 use crate::icons::{self, Icon};
 use crate::widgets::{self, Caption, Detail, Fact, Outline, Row, Spec, SystemCard, SystemMark, Tone, Trail};
-use skyward_info::{DeviceInfo, VERSION};
+use skyward_info::{DeviceInfo, OsName, VERSION};
 use skyward_install::{Outcome, Reflash, Refusal, Stage};
 use skyward_net::download::Progress;
 use skyward_net::supplicant::Security;
@@ -590,6 +590,20 @@ const BATTERY_CAPACITY: Text = ["电池容量", "電池容量", "Battery capacit
 const SCREEN_SIZE: Text = ["屏幕尺寸", "螢幕尺寸", "Screen size"];
 const RESOLUTION: Text = ["分辨率", "解析度", "Resolution"];
 const OS_VERSION: Text = ["OS 版本", "OS 版本", "OS version"];
+const MIUI_VERSION: Text = ["MIUI 版本", "MIUI 版本", "MIUI version"];
+const COLOROS_VERSION: Text = ["ColorOS 版本", "ColorOS 版本", "ColorOS version"];
+const FLYME_VERSION: Text = ["FlymeOS 版本", "FlymeOS 版本", "FlymeOS version"];
+
+/// What the system's version is called on the pages: each maker names its
+/// own, and one not known keeps the generic name.
+fn os_label(info: &DeviceInfo) -> Text {
+    match info.os_name {
+        Some(OsName::Miui) => MIUI_VERSION,
+        Some(OsName::ColorOs) => COLOROS_VERSION,
+        Some(OsName::Flyme) => FLYME_VERSION,
+        Some(OsName::HyperOs) | None => OS_VERSION,
+    }
+}
 const ANDROID_VERSION: Text = ["Android 版本", "Android 版本", "Android version"];
 const CURRENT_SLOT: Text = ["当前槽位", "目前槽位", "Current slot"];
 const DATA_PART: Text = ["data 分区", "data 分割區", "data partition"];
@@ -614,7 +628,7 @@ fn about_cards(cx: &Ctx, c: &mut Canvas) -> (Vec<Hit>, f32, f32) {
         Fact { title: l.pick(["存储空间", "儲存空間", "Storage"]), value: storage, link: true },
     ];
     if let Some(v) = &i.os_version {
-        facts.push(Fact { title: l.pick(OS_VERSION), value: v.clone(), link: false });
+        facts.push(Fact { title: l.pick(os_label(i)), value: v.clone(), link: false });
     }
     if let Some(r) = &i.android {
         facts.push(Fact { title: l.pick(ANDROID_VERSION), value: r.clone(), link: false });
@@ -669,7 +683,7 @@ pub fn specs(cx: &Ctx) -> Frame {
     let mut y = widgets::spec_grid(&mut c, t, f, top, &grid);
 
     if let Some(v) = &i.os_version {
-        y = widgets::info_card(&mut c, t, f, y + gap, &[(l.pick(OS_VERSION), v.clone())]);
+        y = widgets::info_card(&mut c, t, f, y + gap, &[(l.pick(os_label(i)), v.clone())]);
     }
     if let Some(r) = &i.android {
         y = widgets::info_card(&mut c, t, f, y + gap, &[(l.pick(ANDROID_VERSION), fmt::android(l, r, i.security_patch.as_ref()))]);
