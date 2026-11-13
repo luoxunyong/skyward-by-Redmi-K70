@@ -7,7 +7,7 @@ use std::ffi::{CStr, CString};
 use std::fs;
 use std::io::ErrorKind;
 use std::os::unix::fs::MetadataExt;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::str::FromStr;
 
 /// Version of this build, shown on the About page.
@@ -155,7 +155,7 @@ pub fn collect(cfg: &DeviceConfig) -> Result<DeviceInfo> {
     };
     let system = SystemProps::current()?;
     let os_name = system.os_name();
-    let os_version = system.os_version(cfg, os_name);
+    let os_version = system.os_version(&cfg.device.os_version_prop, os_name);
     Ok(DeviceInfo {
         // The system names the exact edition; the configured model covers a
         // system whose partitions are not mounted.
@@ -208,24 +208,47 @@ impl SystemProps {
         }
     }
 
+    /// Whether any property name `f` accepts is set.
+    fn any_key(&self, f: impl Fn(&str) -> bool) -> bool {
+        match self {
+            SystemProps::Running => false,
+            SystemProps::Installed(props) => props.keys().any(|k| f(k)),
+        }
+    }
+
     /// Which maker's system the properties describe, by the properties each
     /// writes, or else by the name in its display build.
     fn os_name(&self) -> Option<OsName> {
         // The makers that replace a Xiaomi system are read first: their
-        // builds can still carry Xiaomi's properties from the vendor side.
+        // builds can still carry Xiaomi's properties from the vendor side,
+        // and a port may keep the maker's properties in a my_* partition.
         if self.get("ro.build.version.oplusrom").is_some()
             || self.get("ro.build.version.opporom").is_some()
             || self.get("ro.oppo.version").is_some()
+            || self.any_key(|k| {
+                k.starts_with("ro.oplus.") || k.starts_with("ro.oppo.") || k.contains("oplusrom") || k.contains("opporom")
+            })
         {
             return Some(OsName::ColorOs);
         }
-        if self.get("ro.build.flyme.version").is_some() || self.get("ro.flyme.version").is_some() {
+        if self.get("ro.build.flyme.version").is_some()
+            || self.get("ro.flyme.version").is_some()
+            || self.get("ro.flyme.os.version").is_some()
+            || self.any_key(|k| k.starts_with("ro.flyme.") || k.starts_with("ro.meizu."))
+        {
             return Some(OsName::Flyme);
         }
-        if self.get("ro.mi.os.version.incremental").is_some() || self.get("ro.mi.os.version.name").is_some() {
+        if self.get("ro.mi.os.version.incremental").is_some()
+            || self.get("ro.mi.os.version.name").is_some()
+            || self.get("ro.mi.os.version.code").is_some()
+            || self.any_key(|k| k.starts_with("ro.mi.os."))
+        {
             return Some(OsName::HyperOs);
         }
-        if self.get("ro.miui.ui.version.name").is_some() {
+        if self.get("ro.miui.ui.version.name").is_some()
+            || self.get("ro.miui.ui.version.code").is_some()
+            || self.any_key(|k| k.starts_with("ro.miui."))
+        {
             return Some(OsName::Miui);
         }
         let display = self.get("ro.build.display.id").or_else(|| self.get("ro.build.description")).unwrap_or_default();
@@ -244,26 +267,83 @@ impl SystemProps {
     }
 
     /// The version as the maker names it for `name`, or the configured
-    /// property where the maker is not known.
-    fn os_version(&self, cfg: &skyward_config::DeviceConfig, name: Option<OsName>) -> Option<String> {
-        match name {
+    /// property where the maker is not known. A port that names none of
+    /// these still shows the build's own name, so the row is never empty
+    /// when the system tells of a version at all.
+    fn os_version(&self, configured: &str, name: Option<OsName>) -> Option<String> {
+        let version = match name {
             Some(OsName::Miui) => self.get("ro.build.version.incremental").or_else(|| self.get("ro.miui.ui.version.name")),
             Some(OsName::ColorOs) => self
                 .get("ro.build.version.oplusrom")
-                .or_else(|| self.get("ro.build.version.opporom"))
-                .or_else(|| self.get("ro.build.display.id")),
+                .or_else(|| self.get("ro.build.version.oplusrom.display"))
+                .or_else(|| self.get("ro.build.version.opporom")),
             Some(OsName::Flyme) => self
                 .get("ro.build.flyme.version")
                 .or_else(|| self.get("ro.flyme.version"))
-                .or_else(|| self.get("ro.build.display.id")),
-            Some(OsName::HyperOs) | None => self.get(&cfg.device.os_version_prop),
-        }
+                .or_else(|| self.get("ro.flyme.os.version")),
+            Some(OsName::HyperOs) => self
+                .get(configured)
+                .or_else(|| self.get("ro.mi.os.version.incremental"))
+                .or_else(|| self.get("ro.mi.os.version.name"))
+                .or_else(|| self.get("ro.mi.os.version.code")),
+            None => self.get(configured),
+        };
+        version.or_else(|| self.get("ro.build.display.id")).or_else(|| self.get("ro.build.version.incremental"))
     }
 }
 
 /// The order init reads build.prop files in at boot; later files override
-/// earlier ones.
-const PROP_ORDER: [&str; 8] = ["system", "system_ext", "system_dlkm", "vendor", "vendor_dlkm", "odm_dlkm", "odm", "product"];
+/// earlier ones. OPPO's my_* partitions come last, as they do on its phones.
+const PROP_ORDER: [&str; 16] = [
+    "system",
+    "system_ext",
+    "system_dlkm",
+    "vendor",
+    "vendor_dlkm",
+    "odm_dlkm",
+    "odm",
+    "product",
+    "my_product",
+    "my_stock",
+    "my_heytap",
+    "my_carrier",
+    "my_manifest",
+    "my_preload",
+    "my_bigball",
+    "my_company",
+];
+
+/// Every `build.prop` a partition holds, wherever its maker puts it: at the
+/// root, in `etc`, or under one of the partition's own top-level trees
+/// (`system`, `vendor`, OPPO's `my_product`, and so on). Symlinked trees are
+/// left alone, so a recovered system's absolute links cannot lead out of it.
+fn prop_files(root: &Path) -> Result<Vec<PathBuf>> {
+    let mut dirs = vec![root.to_path_buf()];
+    let mut entries = fs::read_dir(root)
+        .with_context(|| format!("read {}", root.display()))?
+        .map(|e| e.map(|e| e.path()))
+        .collect::<Result<Vec<_>, _>>()?;
+    entries.sort();
+    for path in entries {
+        if fs::symlink_metadata(&path).is_ok_and(|m| m.is_dir()) {
+            dirs.push(path);
+        }
+    }
+    let mut files = Vec::new();
+    let mut push = |file: PathBuf| {
+        if fs::metadata(&file).is_ok_and(|m| m.is_file()) {
+            files.push(file);
+        }
+    };
+    for dir in dirs {
+        push(dir.join("build.prop"));
+        let etc = dir.join("etc");
+        if fs::symlink_metadata(&etc).is_ok_and(|m| m.is_dir()) {
+            push(etc.join("build.prop"));
+        }
+    }
+    Ok(files)
+}
 
 /// What init names the properties the bootloader passes.
 const BOOT_PROPS: &str = "ro.boot.";
@@ -282,18 +362,14 @@ pub fn installed_props(slot: Slot) -> Result<HashMap<String, String>> {
     parts.sort_by_key(|m| PROP_ORDER.iter().position(|b| *b == base(m)).unwrap_or(PROP_ORDER.len()));
     let mut props: HashMap<String, String> = skyward_sys::props(BOOT_PROPS).into_iter().collect();
     for m in &parts {
-        let files: &[&str] = match base(m).as_str() {
-            "system" => &["system/build.prop"],
-            "vendor" => &["default.prop", "build.prop"],
-            _ => &["etc/build.prop"],
-        };
-        for f in files {
-            let path = m.mount_point.join(f);
-            match fs::metadata(&path) {
-                Err(e) if e.kind() == ErrorKind::NotFound => continue,
-                Err(e) => return Err(e).with_context(|| format!("stat {}", path.display())),
-                Ok(_) => {}
+        if base(m) == "vendor" {
+            let path = m.mount_point.join("default.prop");
+            if fs::metadata(&path).is_ok_and(|m| m.is_file()) {
+                rsproperties::load_properties_from_file(&path, None, "u:r:init:s0", &mut props)
+                    .with_context(|| format!("read {}", path.display()))?;
             }
+        }
+        for path in prop_files(&m.mount_point)? {
             rsproperties::load_properties_from_file(&path, None, "u:r:init:s0", &mut props)
                 .with_context(|| format!("read {}", path.display()))?;
         }
@@ -502,6 +578,84 @@ mod tests {
         );
         assert_eq!(props(&[("ro.build.display.id", "ColorOS 15")]).os_name(), Some(OsName::ColorOs));
         assert_eq!(props(&[]).os_name(), None);
+    }
+
+    #[test]
+    fn a_port_is_named_by_the_system_it_carries() {
+        // A ColorOS port on a Xiaomi phone keeps Xiaomi's properties in the
+        // vendor side; ColorOS is still what runs.
+        let port = props(&[
+            ("ro.mi.os.version.incremental", "OS2.0.215.0.VNKCNXM"),
+            ("ro.miui.ui.version.name", "V816"),
+            ("ro.build.version.oplusrom", "V15.0.0"),
+        ]);
+        assert_eq!(port.os_name(), Some(OsName::ColorOs));
+
+        // Some OPPO properties only live in my_product, away from the named ones.
+        let port = props(&[("ro.oplus.product.series", "Reno_series"), ("ro.miui.ui.version.name", "V14")]);
+        assert_eq!(port.os_name(), Some(OsName::ColorOs));
+
+        // A Flyme port on a Xiaomi phone.
+        let port = props(&[("ro.mi.os.version.incremental", "OS2.0.215.0.VNKCNXM"), ("ro.flyme.version", "10.5.0.0A")]);
+        assert_eq!(port.os_name(), Some(OsName::Flyme));
+
+        // A HyperOS port still carries MIUI's own property, but is HyperOS.
+        let port = props(&[("ro.mi.os.version.name", "OS2.0"), ("ro.miui.ui.version.name", "V816")]);
+        assert_eq!(port.os_name(), Some(OsName::HyperOs));
+    }
+
+    #[test]
+    fn the_system_version_is_shown_even_when_a_port_names_it_differently() {
+        let port = props(&[("ro.build.version.oplusrom", "V15.0.0")]);
+        assert_eq!(port.os_version("ro.mi.os.version.incremental", Some(OsName::ColorOs)).as_deref(), Some("V15.0.0"));
+
+        let port = props(&[("ro.build.display.id", "Flyme 10.5.0.0A")]);
+        assert_eq!(
+            port.os_version("ro.mi.os.version.incremental", Some(OsName::Flyme)).as_deref(),
+            Some("Flyme 10.5.0.0A")
+        );
+
+        let port = props(&[
+            ("ro.mi.os.version.incremental", "OS2.0.215.0.VNKCNXM"),
+            ("ro.build.version.incremental", "OS2.0.215.0.VNKCNXM"),
+        ]);
+        assert_eq!(
+            port.os_version("ro.mi.os.version.incremental", Some(OsName::HyperOs)).as_deref(),
+            Some("OS2.0.215.0.VNKCNXM")
+        );
+
+        // A system that names no version at all still shows what it calls itself.
+        let port = props(&[("ro.build.display.id", "Unknown 1.0")]);
+        assert_eq!(port.os_version("ro.mi.os.version.incremental", None).as_deref(), Some("Unknown 1.0"));
+    }
+
+    #[test]
+    fn the_property_files_are_found_wherever_a_maker_puts_them() {
+        let root = std::env::temp_dir().join(format!("skyward-props-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(root.join("my_product/etc")).unwrap();
+        std::fs::create_dir_all(root.join("system/etc")).unwrap();
+        std::fs::write(root.join("build.prop"), "ro.build.display.id=ColorOS 15\n").unwrap();
+        std::fs::write(root.join("my_product/build.prop"), "ro.oplus.product.series=Reno_series\n").unwrap();
+        std::fs::write(root.join("my_product/etc/build.prop"), "ro.oplus.x=1\n").unwrap();
+        std::fs::write(root.join("system/build.prop"), "ro.build.version.oplusrom=V15.0.0\n").unwrap();
+        std::fs::write(root.join("system/etc/build.prop"), "ro.oplus.y=1\n").unwrap();
+        let found: Vec<String> = prop_files(&root)
+            .unwrap()
+            .iter()
+            .map(|p| p.strip_prefix(&root).unwrap().to_string_lossy().replace('\\', "/"))
+            .collect();
+        assert_eq!(
+            found,
+            vec![
+                "build.prop",
+                "my_product/build.prop",
+                "my_product/etc/build.prop",
+                "system/build.prop",
+                "system/etc/build.prop"
+            ]
+        );
+        std::fs::remove_dir_all(&root).unwrap();
     }
 
     #[test]
