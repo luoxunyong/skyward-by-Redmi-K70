@@ -2010,7 +2010,7 @@ pub fn search(cx: &Ctx) -> Frame {
             let list = widgets::list(&mut c, t, f, top, &rows);
             // The keyboard covers what does not fit above it.
             let shown = list.rows.iter().zip(&found).filter(|(r, _)| r.y + r.h <= kb_top);
-            out.extend(shown.map(|(&rect, e)| Hit { rect, action: Action::Open(e.screen) }));
+            out.extend(shown.map(|(&rect, e)| Hit { rect, action: e.action }));
         }
     }
     let find = l.pick(["搜索", "搜尋", "Search"]);

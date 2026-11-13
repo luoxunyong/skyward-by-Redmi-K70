@@ -6413,7 +6413,7 @@ impl App {
             Cap::Enter => match self.screen() {
                 Screen::Search => {
                     if let Some(first) = search::find_on(&self.state.search, l, |screen| self.state.offers(screen)).first() {
-                        return self.act(Action::Open(first.screen), now);
+                        return self.act(first.action, now);
                     }
                 }
                 Screen::Lock if self.state.code.is_empty() => self.say(l.pick(["请输入 PIN", "請輸入 PIN", "Enter the PIN"]), now),

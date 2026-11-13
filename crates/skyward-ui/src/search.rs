@@ -1,4 +1,4 @@
-use crate::app::Screen;
+use crate::app::{Action, Screen};
 use crate::lang::{Lang, Text};
 
 /// A feature or partition the search finds, and the page it opens.
@@ -7,18 +7,31 @@ pub struct Entry {
     /// Where it lives, shown under the title.
     pub place: Text,
     pub screen: Screen,
+    /// What touching it does. Most entries open their screen; a setting
+    /// that is a row of another page names the action that row runs.
+    pub action: Action,
     /// What it answers to besides its title: pinyin in full and by
     /// initials, and English, since the keyboard types Latin letters.
     pub keys: &'static [&'static str],
 }
 
 const fn entry(title: Text, place: Text, screen: Screen, keys: &'static [&'static str]) -> Entry {
-    Entry { title, place, screen, keys }
+    Entry { title, place, screen, action: Action::Open(screen), keys }
+}
+
+const fn doing(
+    title: Text,
+    place: Text,
+    screen: Screen,
+    action: Action,
+    keys: &'static [&'static str],
+) -> Entry {
+    Entry { title, place, screen, action, keys }
 }
 
 /// A partition, named the same in every language.
 const fn partition(name: &'static str, place: Text, screen: Screen) -> Entry {
-    Entry { title: [name; 3], place, screen, keys: &[] }
+    Entry { title: [name; 3], place, screen, action: Action::Open(screen), keys: &[] }
 }
 
 const HOME: Text = ["主页", "主頁", "Home"];
@@ -71,6 +84,13 @@ pub const ENTRIES: &[Entry] = &[
     entry(["息屏时间", "螢幕自動關閉", "Screen timeout"], SETTINGS, Screen::ScreenOff, &["xipingshijian", "xpsj", "timeout"]),
     entry(["振动强度", "震動強度", "Vibration intensity"], SETTINGS, Screen::Settings, &["zhendongqiangdu", "zdqd", "qiangdu", "qd", "intensity", "strength"]),
     entry(["触摸振动", "觸控震動", "Touch vibration"], SETTINGS, Screen::Settings, &["chumozhendong", "cmzd", "zhendong", "vibrate", "haptic"]),
+    doing(
+        ["Recovery 锁屏", "Recovery 鎖屏", "Recovery lock"],
+        SETTINGS,
+        Screen::Settings,
+        Action::OpenLockSetup,
+        &["recoverylock", "recoverylockscreen", "suoping", "sp", "lock", "mima", "mm", "pin", "tuxing", "tx", "pattern", "screenlock", "password"],
+    ),
     entry(["文件传输", "檔案傳輸", "File transfer"], SETTINGS, Screen::Settings, &["wenjianchuanshu", "wjcs", "chuanshu", "mtp", "usb"]),
     entry(["语言", "語言", "Language"], SETTINGS, Screen::Language, &["yuyan", "yy", "language", "fanti", "jianti", "english"]),
     entry(["时区", "時區", "Time zone"], SETTINGS, Screen::TimeZone, &["shiqu", "sq", "timezone"]),
@@ -214,6 +234,16 @@ mod tests {
         let traditional = find("設定", Lang::Hant);
         assert_eq!(traditional.first().map(|e| e.title[1]), Some("設定"));
         assert!(find("设置", Lang::Hant).is_empty(), "the simplified title belongs to the other script");
+    }
+
+    #[test]
+    fn the_recovery_lock_is_found_and_opens_its_setup() {
+        let found = find("suoping", Lang::Hans);
+        assert_eq!(found.first().map(|e| e.title[0]), Some("Recovery 锁屏"));
+        assert_eq!(found.first().map(|e| e.action), Some(Action::OpenLockSetup));
+        assert_eq!(find("mima", Lang::Hans).first().map(|e| e.action), Some(Action::OpenLockSetup));
+        assert_eq!(find("pattern", Lang::En).first().map(|e| e.action), Some(Action::OpenLockSetup));
+        assert_eq!(find("lock", Lang::En).first().map(|e| e.action), Some(Action::OpenLockSetup));
     }
 
     #[test]
