@@ -1,6 +1,6 @@
 use crate::app::{
     Action, BackupAt, BackupEnd, BackupJob, Check, ClashChoice, Confirm, Damage, Data, Dock, DownloadEnd, EraseStop, Field, FileKind,
-    FileOp, FileTask, Fold, Folder, Frame, FsAction, FsChoice, FsRow, Have, HeroArt, Hit, Install, JobEnd, Keys, Pick, Place, Rows, Screen,
+    FileOp, FileTask, Fold, Folder, Frame, FsAction, FsChoice, FsRow, Have, HeroArt, Hit, Install, JobEnd, Keys, LockMode, Pick, Place, Rows, Screen,
     SkywardCheck, SkywardEnd, SkywardJob, SkywardStage, Slider, Source, State, Switch, SystemsWork, Target, UsbDrive, UsbLink, Wipe, ADDABLE,
     BACKUP_PARTS, DATA_ERASED, DATA_PARTITION, DOWNLOADS, FASTBOOT_CHOICES, REFRESH_RATES, SCREEN_OFF, TARGETS, TIME_ZONES,
     USB_DRIVE_UNREADABLE, USB_DRIVE_WANTED, WIPES, installs, starting,
@@ -27,6 +27,7 @@ use skyward_net::wlan::{Bands, Network, Power, Stage as Joining};
 use skyward_systems::Who;
 use skyward_vab::{Slot, Standing};
 use std::path::Path;
+use crate::settings::Lock;
 
 // The colours the stock Settings fills its icons' tiles with, the same in
 // light and dark mode.
@@ -63,6 +64,7 @@ pub struct Band {
 pub fn render(screen: Screen, cx: &Ctx) -> Frame {
     match screen {
         Screen::Decrypt => decrypt(cx),
+        Screen::Lock => lock(cx),
         Screen::Home => home(cx),
         Screen::Settings => settings(cx),
         Screen::Reboot => reboot(cx),
@@ -381,14 +383,23 @@ pub fn settings(cx: &Ctx) -> Frame {
         out.push(Hit { rect: *r, action });
     }
     y = widgets::section(&mut c, t, f, vibration.bottom, l.pick(["通用", "一般", "General"]));
+    let lock = match s.lock.as_ref().and_then(Lock::keys) {
+        Some(Keys::Pattern) => l.pick(["图案", "圖案", "Pattern"]),
+        Some(Keys::Digits) => l.pick(["PIN", "PIN", "PIN"]),
+        _ => l.pick(["关闭", "關閉", "Off"]),
+    };
     let general = widgets::list(&mut c, t, f, y, &[
         Row::new(l.pick(LANGUAGE)).icon(BLUE, Icon::Globe).trail(Trail::Value(l.name())),
         Row::new(l.pick(TIME_ZONE)).icon(ORANGE, Icon::Clock).trail(Trail::Value(l.pick(TIME_ZONES[s.time_zone].0))),
         // Right under the time zone: the clock's own form, as the phone's
         // settings say which.
         Row::new(l.pick(HOUR_FORMAT)).icon(ORANGE, Icon::Clock).trail(Trail::Switch(s.hour24)),
+        Row::new(l.pick(["Recovery 锁屏", "Recovery 鎖屏", "Recovery lock"])).icon(SLATE, Icon::Lock).trail(Trail::Value(lock)),
     ]);
-    out.extend(hits(&general.rows, &[Action::Open(Screen::Language), Action::Open(Screen::TimeZone), Action::Hour24(!s.hour24)]));
+    out.extend(hits(
+        &general.rows,
+        &[Action::Open(Screen::Language), Action::Open(Screen::TimeZone), Action::Hour24(!s.hour24), Action::OpenLockSetup],
+    ));
     y = widgets::section(&mut c, t, f, general.bottom, "USB");
     let usb = widgets::list(&mut c, t, f, y, &[Row::new(l.pick(["文件传输", "檔案傳輸", "File transfer"])).icon(BLUE, Icon::Usb).trail(Trail::Switch(s.file_transfer))]);
     out.extend(hits(&usb.rows, &[Action::Toggle(Switch::FileTransfer)]));
@@ -837,6 +848,89 @@ fn code(cx: &Ctx, mut c: Canvas, user: u32, keys: Keys, checking: bool) -> Frame
     c.text_center(&f.heading, l.pick(NOT_NOW), x, skip_cy, m.row_title_px, t.pal.accent);
     out.push(Hit { rect: Rect::new(x - m.dp(80.0), skip_cy - m.dp(24.0), m.dp(160.0), m.dp(48.0)), action: Action::Skip });
     Frame { header: false, pattern, ..Frame::new(t, c, out, l.pick(DECRYPT), 0.0) }
+}
+
+/// The recovery's own lock: choosing what it is, drawing or entering a
+/// new one, or answering the one the settings hold.
+pub fn lock(cx: &Ctx) -> Frame {
+    let (t, f, s, l) = (cx.t, cx.f, cx.state, cx.state.lang);
+    let mut c = page(cx);
+    let mut out = Vec::new();
+    match &s.lock_mode {
+        LockMode::Choose => {
+            let y = widgets::section_first(&mut c, t, f, t.m.content_top, l.pick(["Recovery 锁屏", "Recovery 鎖屏", "Recovery lock"]));
+            let rows = [
+                Row::new(l.pick(["关闭", "關閉", "Off"])).trail(Trail::Check(s.lock.is_none())),
+                Row::new(l.pick(["图案", "圖案", "Pattern"])).trail(Trail::Check(s.lock.as_ref().and_then(Lock::keys) == Some(Keys::Pattern))),
+                Row::new("PIN").trail(Trail::Check(s.lock.as_ref().and_then(Lock::keys) == Some(Keys::Digits))),
+            ];
+            let list = widgets::list(&mut c, t, f, y, &rows);
+            out.extend(hits(
+                &list.rows,
+                &[Action::LockChoose(None), Action::LockChoose(Some(Keys::Pattern)), Action::LockChoose(Some(Keys::Digits))],
+            ));
+            let note = l.pick([
+                "屏幕熄灭后，点亮时需要图案或 PIN 才能继续使用 recovery。",
+                "螢幕關閉後，喚醒時需要圖案或 PIN 才能繼續使用 recovery。",
+                "After the screen sleeps, its pattern or PIN is asked for when it lights again.",
+            ]);
+            let bottom = widgets::footnote(&mut c, t, f, list.bottom, note);
+            Frame::new(t, fit(c, t, bottom), out, l.pick(["Recovery 锁屏", "Recovery 鎖屏", "Recovery lock"]), t.m.content_top)
+        }
+        LockMode::Set { kind, first } => {
+            let (title, note) = match (kind, first.is_some()) {
+                (Keys::Pattern, false) => (l.pick(["绘制新图案", "繪製新圖案", "Draw a new pattern"]), l.pick(["至少连接 4 个点", "請至少連接 4 個點", "Connect at least 4 dots"])),
+                (Keys::Pattern, true) => (l.pick(["再次绘制图案", "再次繪製圖案", "Draw it again"]), l.pick(["确认与第一次相同", "確認與第一次相同", "Make it the same as before"])),
+                (_, false) => (l.pick(["输入新 PIN", "輸入新 PIN", "Enter a new PIN"]), l.pick(["至少 4 位数字", "至少 4 位數字", "At least 4 digits"])),
+                (_, true) => (l.pick(["再次输入 PIN", "再次輸入 PIN", "Enter it again"]), l.pick(["确认与第一次相同", "確認與第一次相同", "Make it the same as before"])),
+            };
+            lock_entry(cx, c, *kind, title, note, true)
+        }
+        LockMode::Unlock => {
+            let kind = s.lock.as_ref().and_then(Lock::keys).unwrap_or(Keys::Digits);
+            let (title, note) = match kind {
+                Keys::Pattern => (l.pick(["绘制图案解锁", "繪製圖案解鎖", "Draw the pattern"]), l.pick(["解锁后才能继续使用 recovery", "解鎖後才能繼續使用 recovery", "Unlock to use the recovery"])),
+                _ => (l.pick(["输入 PIN 解锁", "輸入 PIN 解鎖", "Enter the PIN"]), l.pick(["解锁后才能继续使用 recovery", "解鎖後才能繼續使用 recovery", "Unlock to use the recovery"])),
+            };
+            lock_entry(cx, c, kind, title, note, false)
+        }
+    }
+}
+
+/// The pattern grid or keypad a lock is answered with, under its title and
+/// note; in the settings a way to leave without setting one.
+fn lock_entry(cx: &Ctx, mut c: Canvas, keys: Keys, title: &str, note: &str, setting: bool) -> Frame {
+    let (t, f, s, l) = (cx.t, cx.f, cx.state, cx.state.lang);
+    let m = &t.m;
+    let x = m.w as f32 / 2.0;
+    let mut out = Vec::new();
+    c.text_center(&f.heading, title, x, m.dp(130.0), m.dp(24.0), t.pal.text);
+    c.text_center(&f.body, note, x, m.dp(166.0), m.sub_px, t.pal.subtitle);
+    let mut pattern = None;
+    let bottom = match keys {
+        Keys::Pattern => {
+            let span = m.dp(300.0);
+            let cy = m.dp(300.0) + span / 2.0;
+            widgets::pattern_lock(&mut c, t, x, cy, span, &s.pattern);
+            out.push(Hit { rect: Rect::new(x - span, cy - span, span * 2.0, span * 2.0), action: Action::Pattern });
+            pattern = Some((x, cy, span));
+            m.h as f32 - m.dp(26.0)
+        }
+        _ => {
+            let top = m.h as f32 - widgets::keypad_height(t);
+            let caps = widgets::keypad(&mut c, t, f, l, top, s.key_held());
+            out.extend(caps.into_iter().map(|(rect, cap)| Hit { rect, action: Action::Type(cap) }));
+            widgets::code_dots(&mut c, t, x, top - m.dp(92.0), s.code.chars().count());
+            top
+        }
+    };
+    if setting {
+        let cancel = l.pick(["取消", "取消", "Cancel"]);
+        let cy = bottom - m.dp(34.0);
+        c.text_center(&f.heading, cancel, x, cy, m.row_title_px, t.pal.accent);
+        out.push(Hit { rect: Rect::new(x - m.dp(80.0), cy - m.dp(24.0), m.dp(160.0), m.dp(48.0)), action: Action::Back });
+    }
+    Frame { header: false, pattern, ..Frame::new(t, c, out, l.pick(["Recovery 锁屏", "Recovery 鎖屏", "Recovery lock"]), 0.0) }
 }
 
 /// What a slot is shown as where the boot control could not be read.

@@ -5,7 +5,7 @@
 //! a time zone, a part or a place by its name, so a later version that lists
 //! them otherwise reads them the same.
 
-use crate::app::{Place, State, REFRESH_RATES, SCREEN_OFF, TIME_ZONES};
+use crate::app::{Keys, Place, State, REFRESH_RATES, SCREEN_OFF, TIME_ZONES};
 use crate::Lang;
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
@@ -60,6 +60,31 @@ pub struct Settings {
     pub install: Install,
     pub backup: Backup,
     pub logs: Logs,
+    /// What locks the recovery after the screen sleeps, hashed.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub lock: Option<Lock>,
+}
+
+/// The recovery's own screen lock: the control it is answered with, a salt,
+/// and the hash of the answer, so the file never holds the pattern or PIN.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Lock {
+    /// `pattern` or `pin`.
+    pub kind: String,
+    pub salt: String,
+    pub hash: String,
+}
+
+impl Lock {
+    /// The control this lock is answered with, where the file names one this
+    /// version knows.
+    pub fn keys(&self) -> Option<Keys> {
+        match self.kind.as_str() {
+            "pattern" => Some(Keys::Pattern),
+            "pin" => Some(Keys::Digits),
+            _ => None,
+        }
+    }
 }
 
 /// The install page's options.
@@ -148,6 +173,7 @@ impl Settings {
                 verify: state.verify,
             },
             logs: Logs { kinds: names(&state.logs, &LOGS), to: LOG_PLACES[state.logs_to].to_string() },
+            lock: state.lock.clone(),
         }
     }
 
@@ -218,6 +244,7 @@ impl Settings {
         if let Some(at) = LOG_PLACES.iter().position(|place| *place == self.logs.to) {
             state.logs_to = at;
         }
+        state.lock = self.lock.clone().filter(|lock| lock.keys().is_some());
     }
 }
 

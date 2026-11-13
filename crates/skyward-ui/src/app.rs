@@ -14,7 +14,7 @@ use crate::motion::{self, Spring};
 use crate::pages::{self, Band, Ctx};
 use crate::sprite::{Blurs, Sprite};
 use crate::search;
-use crate::settings::Settings;
+use crate::settings::{Lock, Settings};
 use crate::term::{self, Term, TermKey};
 use crate::theme::Theme;
 use crate::tr;
@@ -33,6 +33,8 @@ use skyward_vab::{BootSlots, Hold, Slot, SnapshotState, Standing};
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Screen {
     Decrypt,
+    /// The recovery's own lock, shown when the panel lights after it slept.
+    Lock,
     Home,
     Settings,
     Reboot,
@@ -810,6 +812,19 @@ pub enum Keys {
     Letters,
 }
 
+/// What the recovery lock page is doing.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub enum LockMode {
+    /// Waiting for the pattern or PIN the recovery's lock is answered with.
+    #[default]
+    Unlock,
+    /// Choosing what locks the recovery.
+    Choose,
+    /// Drawing or entering a new one; `first` holds the first entry while
+    /// the second is asked for.
+    Set { kind: Keys, first: Option<String> },
+}
+
 /// Where the data partition stands.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub enum Data {
@@ -1197,6 +1212,10 @@ pub enum Action {
     Confirm(Confirm),
     /// The pattern grid on the unlock page.
     Pattern,
+    /// Open the recovery lock's own page, choosing what locks it.
+    OpenLockSetup,
+    /// Lock the recovery with this control, or with none.
+    LockChoose(Option<Keys>),
     /// Start receiving a package over USB.
     Sideload,
     /// Send the image to one of the partitions it fits.
@@ -1880,6 +1899,10 @@ pub struct State {
     /// Where the data partition stands, and what is typed at the screen
     /// lock its users' own files wait on.
     pub data: Data,
+    /// What locks the recovery after the screen sleeps, and its hash.
+    pub lock: Option<Lock>,
+    /// What the recovery lock page is doing.
+    pub lock_mode: LockMode,
     pub code: String,
     /// What is typed in the search field.
     pub search: String,
@@ -2013,6 +2036,8 @@ impl Default for State {
             systems_work: None,
             system_notice: None,
             data: Data::Closed,
+            lock: None,
+            lock_mode: LockMode::Unlock,
             code: String::new(),
             search: String::new(),
             layer: Layer::Letters,
@@ -2781,6 +2806,32 @@ struct Turn {
 }
 
 /// Whether a control is a row: as wide as the cards it lies on.
+/// The name the settings give a lock answered with `kind`.
+fn lock_kind_name(kind: Keys) -> &'static str {
+    match kind {
+        Keys::Pattern => "pattern",
+        Keys::Digits | Keys::Letters => "pin",
+    }
+}
+
+/// The hash the settings keep of an answer: the control, the salt and what
+/// was drawn or typed, so the file never holds the answer itself.
+fn lock_hash(kind: &str, salt: &str, code: &str) -> String {
+    use sha2::{Digest, Sha256};
+    use std::fmt::Write as _;
+    let mut h = Sha256::new();
+    h.update(kind.as_bytes());
+    h.update(b":");
+    h.update(salt.as_bytes());
+    h.update(b":");
+    h.update(code.as_bytes());
+    let mut out = String::with_capacity(64);
+    for byte in h.finalize() {
+        let _ = write!(out, "{byte:02x}");
+    }
+    out
+}
+
 fn row_wide(t: &Theme, r: Rect) -> bool {
     let m = &t.m;
     (r.x - m.margin).abs() < 0.5 && (r.w - (m.w as f32 - m.margin * 2.0)).abs() < 0.5
@@ -2807,6 +2858,8 @@ pub struct App {
     /// The pages open, the one shown last: each with how far it is
     /// scrolled and where the keys are on it.
     stack: Vec<(Screen, f32, Focus)>,
+    /// The page under the recovery's lock, shown again once it is answered.
+    lock_back: Option<Screen>,
     frame: Option<Frame>,
     /// The controls of the page drawn, in the order the keys go through
     /// them.
@@ -2950,6 +3003,7 @@ impl App {
         App {
             state: State::default(),
             stack: vec![(start, 0.0, Focus::Unset)],
+            lock_back: None,
             frame: None,
             spots: None,
             // The touchscreen may run from the partitions fastboot leaves
@@ -3456,6 +3510,36 @@ impl App {
         self.row_press = None;
         self.row_art = None;
         self.end_turn();
+        // The recovery's own lock takes the page when the panel goes off, so
+        // the next light asks for its pattern or PIN first. A page already
+        // on the lock, as when the key turns it off again, keeps what it is.
+        if self.state.lock.is_some() {
+            if self.screen() != Screen::Lock {
+                self.lock_back = Some(self.screen());
+                self.state.lock_mode = LockMode::Unlock;
+                self.state.code.clear();
+                self.state.pattern.clear();
+                self.stack.clear();
+                self.stack.push((Screen::Lock, 0.0, Focus::Unset));
+                self.settle_page();
+                self.refresh();
+                self.dirty = true;
+            } else if self.state.lock_mode != LockMode::Unlock {
+                // The lock was being set up when the panel went off: the one
+                // already set is asked for on waking, and the setup waits
+                // behind it.
+                self.lock_back.get_or_insert(Screen::Settings);
+                self.state.lock_mode = LockMode::Unlock;
+                self.state.code.clear();
+                self.state.pattern.clear();
+                self.refresh();
+                self.dirty = true;
+            } else {
+                // A half-drawn pattern or typed PIN is let go with the panel.
+                self.state.code.clear();
+                self.state.pattern.clear();
+            }
+        }
     }
 
     /// A page sliding over another comes to rest at once.
@@ -5439,6 +5523,18 @@ impl App {
                 self.settle_page();
                 self.refresh();
             }
+            Action::OpenLockSetup => {
+                self.state.lock_mode = LockMode::Choose;
+                self.state.code.clear();
+                self.state.pattern.clear();
+                self.open(Screen::Lock);
+                return self.arrive_at(Screen::Lock);
+            }
+            Action::LockChoose(kind) => return self.lock_choose(kind, now),
+            Action::Back if self.screen() == Screen::Lock && self.state.lock_mode == LockMode::Unlock => {
+                self.say(l.pick(["请先解锁", "請先解鎖", "Unlock first"]), now);
+            }
+            Action::Back if self.screen() == Screen::Lock => return self.lock_leave(),
             Action::Back | Action::CloseSearch => return self.back(now),
             Action::Theme { dark } => {
                 if self.state.dark != dark {
@@ -5989,6 +6085,7 @@ impl App {
     fn typing(&mut self) -> &mut String {
         match self.screen() {
             Screen::Search => &mut self.state.search,
+            Screen::Lock => &mut self.state.code,
             Screen::Decrypt => &mut self.state.code,
             Screen::Rename => &mut self.state.new_name,
             Screen::WlanPassword => &mut self.state.password,
@@ -6065,6 +6162,125 @@ impl App {
         } else {
             vec![Effect::TermInput(bytes)]
         }
+    }
+
+    /// Answer the recovery's own lock, or set one up: `code` is what was
+    /// drawn or typed, read as the dots' numbers for a pattern.
+    fn lock_entered(&mut self, kind: Keys, code: String, now: u64) -> Vec<Effect> {
+        match self.state.lock_mode.clone() {
+            LockMode::Unlock => self.lock_try(kind, code, now),
+            LockMode::Set { kind, first } => self.lock_set(kind, first, code, now),
+            LockMode::Choose => Vec::new(),
+        }
+    }
+
+    /// Compare what was entered with the lock the settings hold. A right
+    /// answer puts the page that was under it back; a wrong one clears the
+    /// dots and says so.
+    fn lock_try(&mut self, kind: Keys, code: String, now: u64) -> Vec<Effect> {
+        let Some(lock) = self.state.lock.clone() else {
+            self.lock_opened();
+            return Vec::new();
+        };
+        let kind_name = lock_kind_name(kind);
+        let ok = lock.keys() == Some(kind) && lock.hash == lock_hash(kind_name, &lock.salt, &code);
+        if ok {
+            self.lock_opened();
+            return Vec::new();
+        }
+        self.state.code.clear();
+        self.state.pattern.clear();
+        self.refresh();
+        let said = match kind {
+            Keys::Pattern => ["图案错误，请重试", "圖案錯誤，請重試", "Wrong pattern. Try again"],
+            _ => ["PIN 错误，请重试", "PIN 錯誤，請重試", "Wrong PIN. Try again"],
+        };
+        self.say(self.state.lang.pick(said), now);
+        Vec::new()
+    }
+
+    /// The first entry of a new lock is kept; the second has to match it,
+    /// and then only its hash and salt go into the settings.
+    fn lock_set(&mut self, kind: Keys, first: Option<String>, code: String, now: u64) -> Vec<Effect> {
+        if kind == Keys::Digits && code.chars().count() < 4 {
+            self.say(self.state.lang.pick(["PIN 至少 4 位数字", "PIN 至少 4 位數字", "A PIN needs at least 4 digits"]), now);
+            return Vec::new();
+        }
+        let Some(first) = first else {
+            self.state.lock_mode = LockMode::Set { kind, first: Some(code) };
+            self.state.code.clear();
+            self.state.pattern.clear();
+            self.refresh();
+            return Vec::new();
+        };
+        if first != code {
+            self.state.lock_mode = LockMode::Set { kind, first: None };
+            self.state.code.clear();
+            self.state.pattern.clear();
+            self.refresh();
+            self.say(self.state.lang.pick(["两次输入不一致，请重新设置", "兩次輸入不一致，請重新設定", "They don't match. Try again"]), now);
+            return Vec::new();
+        }
+        let kind_name = lock_kind_name(kind);
+        let salt = format!("{now:x}");
+        let hash = lock_hash(kind_name, &salt, &code);
+        self.state.lock = Some(Lock { kind: kind_name.into(), salt, hash });
+        self.state.lock_mode = LockMode::Unlock;
+        self.state.code.clear();
+        self.state.pattern.clear();
+        self.back_to_settings();
+        self.say(self.state.lang.pick(["锁屏已设置", "鎖屏已設定", "The lock is set"]), now);
+        Vec::new()
+    }
+
+    /// Choosing none turns the lock off; choosing a control starts setting
+    /// one, the page asking for it twice.
+    fn lock_choose(&mut self, kind: Option<Keys>, now: u64) -> Vec<Effect> {
+        match kind {
+            Some(kind) => {
+                self.state.lock_mode = LockMode::Set { kind, first: None };
+                self.state.code.clear();
+                self.state.pattern.clear();
+                self.refresh();
+                Vec::new()
+            }
+            None => {
+                self.state.lock = None;
+                self.back_to_settings();
+                self.say(self.state.lang.pick(["锁屏已关闭", "鎖屏已關閉", "The lock is off"]), now);
+                Vec::new()
+            }
+        }
+    }
+
+    /// A right answer takes the lock away and puts the page that was under
+    /// it back.
+    fn lock_opened(&mut self) {
+        let back = self.lock_back.take().unwrap_or(Screen::Home);
+        self.state.code.clear();
+        self.state.pattern.clear();
+        self.state.lock_mode = LockMode::Unlock;
+        self.stack.clear();
+        self.stack.push((back, 0.0, Focus::Unset));
+        self.settle_page();
+        self.refresh();
+    }
+
+    /// Leaving the lock's settings, by the way back or once they are done,
+    /// returns to the page they were opened from.
+    fn lock_leave(&mut self) -> Vec<Effect> {
+        self.back_to_settings();
+        Vec::new()
+    }
+
+    fn back_to_settings(&mut self) {
+        self.state.lock_mode = LockMode::Unlock;
+        self.state.code.clear();
+        self.state.pattern.clear();
+        self.stack.clear();
+        self.stack.push((Screen::Settings, 0.0, Focus::Unset));
+        self.settle_page();
+        self.refresh();
     }
 
     /// Send what was entered at the screen lock of the user whose own
@@ -6179,6 +6395,11 @@ impl App {
                     if let Some(first) = search::find_on(&self.state.search, l, |screen| self.state.offers(screen)).first() {
                         return self.act(Action::Open(first.screen), now);
                     }
+                }
+                Screen::Lock if self.state.code.is_empty() => self.say(l.pick(["请输入 PIN", "請輸入 PIN", "Enter the PIN"]), now),
+                Screen::Lock => {
+                    let code = std::mem::take(&mut self.state.code);
+                    return self.lock_entered(Keys::Digits, code, now);
                 }
                 Screen::Decrypt if self.state.code.is_empty() => self.say(l.pick(["请输入锁屏密码", "請輸入螢幕鎖定密碼", "Enter the screen lock"]), now),
                 Screen::Decrypt => {
@@ -6922,7 +7143,12 @@ impl App {
             self.say(self.state.lang.pick(["请至少连接 4 个点", "請至少連接 4 個點", "Connect at least 4 dots"]), now);
             return Vec::new();
         }
-        self.unlock(drawn.iter().map(|i| (b'1' + *i as u8) as char).collect())
+        let code: String = drawn.iter().map(|i| (b'1' + *i as u8) as char).collect();
+        if self.screen() == Screen::Lock {
+            self.lock_entered(Keys::Pattern, code, now)
+        } else {
+            self.unlock(code)
+        }
     }
 
     /// A volume key: the first lights the control the keys were last on
@@ -11996,4 +12222,51 @@ mod tests {
         app.tick(15_000);
         assert!(!app.display_on());
     }
+
+    #[test]
+    fn the_recovery_lock_waits_for_sleep_and_opens_with_its_pattern() {
+        let mut app = App::new(Screen::Home, W, H, PPD);
+        let salt = "0a0b";
+        app.state.lock = Some(Lock { kind: "pattern".into(), salt: salt.into(), hash: lock_hash("pattern", salt, "1236") });
+        assert_eq!(app.screen(), Screen::Home, "the lock waits for the screen to sleep");
+        press(&mut app, Key::Power, 1000);
+        assert_eq!(app.screen(), Screen::Lock);
+        assert!(!app.display_on());
+        press(&mut app, Key::Power, 2000);
+        assert!(app.display_on());
+        assert_eq!(app.screen(), Screen::Lock);
+        app.lock_entered(Keys::Pattern, "1234".into(), 3000);
+        assert_eq!(app.screen(), Screen::Lock, "a wrong pattern keeps it");
+        app.lock_entered(Keys::Pattern, "1236".into(), 4000);
+        assert_eq!(app.screen(), Screen::Home);
+    }
+
+    #[test]
+    fn the_recovery_lock_opens_with_its_pin() {
+        let mut app = App::new(Screen::Home, W, H, PPD);
+        let salt = "0c0d";
+        app.state.lock = Some(Lock { kind: "pin".into(), salt: salt.into(), hash: lock_hash("pin", salt, "4321") });
+        app.sleep(10);
+        assert_eq!(app.screen(), Screen::Lock);
+        app.lock_entered(Keys::Digits, "1234".into(), 20);
+        assert_eq!(app.screen(), Screen::Lock, "a wrong PIN keeps it");
+        app.lock_entered(Keys::Digits, "4321".into(), 30);
+        assert_eq!(app.screen(), Screen::Home);
+    }
+
+    #[test]
+    fn setting_a_lock_keeps_its_hash_and_returns_to_settings() {
+        let mut app = App::new(Screen::Settings, W, H, PPD);
+        app.act_page(Action::OpenLockSetup, 0);
+        assert_eq!(app.screen(), Screen::Lock);
+        assert_eq!(app.state.lock_mode, LockMode::Choose);
+        app.act_page(Action::LockChoose(Some(Keys::Digits)), 1);
+        app.lock_entered(Keys::Digits, "1234".into(), 2);
+        app.lock_entered(Keys::Digits, "1234".into(), 3);
+        let lock = app.state.lock.as_ref().expect("a lock is set");
+        assert_eq!(lock.kind, "pin");
+        assert_eq!(lock.hash, lock_hash("pin", &lock.salt, "1234"));
+        assert_eq!(app.screen(), Screen::Settings);
+    }
+
 }

@@ -17,6 +17,8 @@ png = "0.17.16"
 # The settings are kept between starts as a JSON file.
 serde = { workspace = true }
 serde_json = "1.0.154"
+# The recovery lock keeps only a hash of the pattern or PIN.
+sha2 = "0.10.9"
 skyward-info = { path = "../skyward-info" }
 skyward-install = { path = "../skyward-install" }
 skyward-net = { path = "../skyward-net" }

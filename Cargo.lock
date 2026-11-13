@@ -2529,6 +2529,7 @@ dependencies = [
  "proc-macro2",
  "serde",
  "serde_json",
+ "sha2 0.10.9",
  "skyward-info",
  "skyward-install",
  "skyward-net",
