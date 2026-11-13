@@ -11937,21 +11937,19 @@ mod tests {
     }
 
     #[test]
-    fn a_touch_on_the_dark_panel_lights_nothing() {
+    fn a_touch_on_the_dark_panel_lights_it_and_presses_nothing() {
         let (f, i) = (fonts(), info());
         let mut app = App::new(Screen::Home, W, H, PPD);
         let (x, y) = spot(&mut app, &f, &i, Action::Open(Screen::Settings));
         press(&mut app, Key::Power, 0);
         assert!(app.touch(Touch::Down(x, y), &f, 100).is_empty());
+        assert!(app.display_on(), "the panel lights");
         assert!(app.touch(Touch::Move(x, y - 300.0), &f, 120).is_empty());
         assert!(app.touch(Touch::Up, &f, 140).is_empty());
-        assert!(!app.display_on(), "the panel stays dark");
         assert_eq!(app.screen(), Screen::Home, "the tap pressed nothing");
         assert_eq!(app.top().1, 0.0, "nor scrolled the page");
-        press(&mut app, Key::Power, 200);
-        assert!(app.display_on());
         tap_at(&mut app, &f, &i, Action::Open(Screen::Settings), 700);
-        assert_eq!(app.screen(), Screen::Settings, "a tap on the lit panel does");
+        assert_eq!(app.screen(), Screen::Settings, "the next tap on the lit panel does");
     }
 
     #[test]
