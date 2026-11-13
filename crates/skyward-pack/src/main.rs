@@ -70,6 +70,16 @@ enum Cmd {
         #[arg(long)]
         out: PathBuf,
     },
+    /// Turn off verified boot's checks in a stock vbmeta image, as fastboot
+    /// does with `--disable-verity --disable-verification` before writing
+    /// it. Flash the result to the vbmeta partition beside the recovery.
+    Vbmeta {
+        /// The stock vbmeta image.
+        image: PathBuf,
+        /// Where to write the patched image.
+        #[arg(long)]
+        out: PathBuf,
+    },
     /// Print the stock build a device's recovery is made on, as lines of
     /// name=value: its version, where its full update package is, and the
     /// SHA-256 of the recovery partition in that package. Given somewhere
@@ -151,6 +161,12 @@ fn main() -> Result<()> {
             img.ramdisk = rd.encode()?;
             let bytes = img.to_bytes()?;
             write(&out, &img, &avb::footed(&bytes, "recovery", size, &Sha256::digest(&bytes))?)
+        }
+        Cmd::Vbmeta { image, out } => {
+            let mut bytes = std::fs::read(&image).with_context(|| format!("read {}", image.display()))?;
+            avb::disable_verification(&mut bytes).with_context(|| format!("patch {}", image.display()))?;
+            std::fs::write(&out, &bytes).with_context(|| format!("write {}", out.display()))?;
+            Ok(())
         }
         Cmd::Stock { config, out } => {
             let stock = skyward_config::DeviceConfig::load(&config)?.stock.with_context(|| format!("{} names no stock build", config.display()))?;

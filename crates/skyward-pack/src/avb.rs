@@ -15,6 +15,24 @@ const FOOTER_LEN: usize = 64;
 const HEADER_LEN: usize = 256;
 const TAG_HASH: u64 = 2;
 const RELEASE: &[u8] = b"skyward-pack";
+/// The flags field of a vbmeta header: where it lies and what fastboot's
+/// `--disable-verity --disable-verification` sets in it.
+const FLAGS_OFFSET: usize = 120;
+const HASHTREE_DISABLED: u32 = 1;
+const VERIFICATION_DISABLED: u32 = 1 << 1;
+
+/// Turn off verified boot's checks in a stock vbmeta image, as fastboot
+/// does to the buffer it writes when given `--disable-verity
+/// --disable-verification`. The signature then no longer matches, which is
+/// why an unlocked bootloader is what takes such an image.
+pub fn disable_verification(image: &mut [u8]) -> Result<()> {
+    ensure!(image.len() >= HEADER_LEN, "a vbmeta image is at least {HEADER_LEN} bytes");
+    ensure!(&image[..4] == b"AVB0", "the image does not start with an AVB vbmeta header");
+    let flags = u32::from_be_bytes(image[FLAGS_OFFSET..FLAGS_OFFSET + 4].try_into().expect("four flag bytes"));
+    let flags = flags | HASHTREE_DISABLED | VERIFICATION_DISABLED;
+    image[FLAGS_OFFSET..FLAGS_OFFSET + 4].copy_from_slice(&flags.to_be_bytes());
+    Ok(())
+}
 
 /// `image` grown to fill a `partition_size`-byte partition named
 /// `partition`: the image, its vbmeta image from the next block on, and the
@@ -113,6 +131,20 @@ mod tests {
             1000 => include_bytes!("../tests/avb-footer-1000.bin"),
             _ => unreachable!(),
         }
+    }
+
+    #[test]
+    fn disabling_verification_sets_the_two_flags_fastboot_sets() {
+        let mut image = vec![0u8; HEADER_LEN];
+        image[..4].copy_from_slice(b"AVB0");
+        disable_verification(&mut image).unwrap();
+        assert_eq!(u32::from_be_bytes(image[FLAGS_OFFSET..FLAGS_OFFSET + 4].try_into().unwrap()), 3);
+
+        let mut short = b"AVB0".to_vec();
+        assert!(disable_verification(&mut short).is_err(), "a short image");
+        let mut wrong = vec![0u8; HEADER_LEN];
+        wrong[..4].copy_from_slice(b"NOPE");
+        assert!(disable_verification(&mut wrong).is_err(), "not a vbmeta image");
     }
 
     #[test]
