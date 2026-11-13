@@ -2860,6 +2860,9 @@ pub struct App {
     stack: Vec<(Screen, f32, Focus)>,
     /// The page under the recovery's lock, shown again once it is answered.
     lock_back: Option<Screen>,
+    /// The lock page shows with the panel on and its light out, so the touch
+    /// controller that follows the panel stays awake to light it again.
+    locked_dark: bool,
     frame: Option<Frame>,
     /// The controls of the page drawn, in the order the keys go through
     /// them.
@@ -3004,6 +3007,7 @@ impl App {
             state: State::default(),
             stack: vec![(start, 0.0, Focus::Unset)],
             lock_back: None,
+            locked_dark: false,
             frame: None,
             spots: None,
             // The touchscreen may run from the partitions fastboot leaves
@@ -3162,6 +3166,9 @@ impl App {
     /// When sitting idle next changes the lit panel: when it dims, or once
     /// it is dimming, when it goes off.
     fn idle_due(&self) -> Option<u64> {
+        if self.locked_dark {
+            return None;
+        }
         let (active, after) = (self.active?, SCREEN_OFF[self.state.screen_off]?);
         if !self.display_on {
             return None;
@@ -3408,6 +3415,9 @@ impl App {
     /// slider's top, which holds as the content goes dark after the panel
     /// is told to go off.
     pub fn panel(&self, now: u64) -> Option<f32> {
+        if self.locked_dark {
+            return Some(0.0);
+        }
         if !self.display_on {
             return self.darkening.filter(|_| self.curtain.level(now) > 0.0);
         }
@@ -3425,6 +3435,7 @@ impl App {
     /// Light the panel, as if just touched: the content comes up from as
     /// dark as it is.
     fn wake(&mut self, now: u64) {
+        self.locked_dark = false;
         if !self.display_on {
             self.display_on = true;
             self.dirty = true;
@@ -3490,10 +3501,9 @@ impl App {
     /// now, then the panel goes off. A finger on the glass lets go of what
     /// it held, and the page stops where it is.
     fn sleep(&mut self, now: u64) {
-        self.darkening = self.panel(now);
-        self.curtain.set(false, now);
-        self.display_on = false;
-        self.bright = full_brightness();
+        if self.locked_dark {
+            return;
+        }
         match std::mem::replace(&mut self.drag, Drag::Idle) {
             Drag::Confirm { .. } => {
                 self.state.confirm = 0.0;
@@ -3516,36 +3526,35 @@ impl App {
         self.row_press = None;
         self.row_art = None;
         self.end_turn();
-        // The recovery's own lock takes the page when the panel goes off, so
-        // the next light asks for its pattern or PIN first. A page already
-        // on the lock, as when the key turns it off again, keeps what it is.
         if self.state.lock.is_some() {
+            // Locked, the panel stays on with its light out: the touch
+            // controller following it has to stay awake to light the page
+            // again, and the phone is kept from suspending for that reason.
+            self.locked_dark = true;
+            self.display_on = true;
+            self.darkening = None;
+            self.bright = full_brightness();
+            self.curtain.set(true, now);
             if self.screen() != Screen::Lock {
                 self.lock_back = Some(self.screen());
                 self.state.lock_mode = LockMode::Unlock;
-                self.state.code.clear();
-                self.state.pattern.clear();
                 self.stack.clear();
                 self.stack.push((Screen::Lock, 0.0, Focus::Unset));
                 self.settle_page();
-                self.refresh();
-                self.dirty = true;
             } else if self.state.lock_mode != LockMode::Unlock {
-                // The lock was being set up when the panel went off: the one
-                // already set is asked for on waking, and the setup waits
-                // behind it.
                 self.lock_back.get_or_insert(Screen::Settings);
                 self.state.lock_mode = LockMode::Unlock;
-                self.state.code.clear();
-                self.state.pattern.clear();
-                self.refresh();
-                self.dirty = true;
-            } else {
-                // A half-drawn pattern or typed PIN is let go with the panel.
-                self.state.code.clear();
-                self.state.pattern.clear();
             }
+            self.state.code.clear();
+            self.state.pattern.clear();
+            self.refresh();
+            self.dirty = true;
+            return;
         }
+        self.darkening = self.panel(now);
+        self.curtain.set(false, now);
+        self.display_on = false;
+        self.bright = full_brightness();
     }
 
     /// A page sliding over another comes to rest at once.
@@ -6262,6 +6271,8 @@ impl App {
     /// A right answer takes the lock away and puts the page that was under
     /// it back.
     fn lock_opened(&mut self) {
+        self.locked_dark = false;
+        self.display_on = true;
         let back = self.lock_back.take().unwrap_or(Screen::Home);
         self.state.code.clear();
         self.state.pattern.clear();
@@ -6283,8 +6294,11 @@ impl App {
         self.state.lock_mode = LockMode::Unlock;
         self.state.code.clear();
         self.state.pattern.clear();
-        self.stack.clear();
-        self.stack.push((Screen::Settings, 0.0, Focus::Unset));
+        if self.screen() == Screen::Lock && self.stack.len() > 1 {
+            self.stack.pop();
+        } else if self.screen() != Screen::Settings {
+            self.stack.push((Screen::Settings, 0.0, Focus::Unset));
+        }
         self.settle_page();
         self.refresh();
     }
@@ -6490,6 +6504,11 @@ impl App {
     }
 
     pub fn touch(&mut self, ev: Touch, f: &Fonts, now: u64) -> Vec<Effect> {
+        if self.locked_dark {
+            self.locked_dark = false;
+            self.stir(now);
+            self.dirty = true;
+        }
         // A finger on the dark panel lights it, as the phone's own system
         // does; the touch that wakes it does nothing more, so the page under
         // it is not worked by a hand reaching for the phone.
@@ -6821,6 +6840,15 @@ impl App {
         // Any button stops a gliding page, and brings a sliding one to rest.
         self.fling = None;
         self.end_turn();
+        if self.locked_dark {
+            self.locked_dark = false;
+            self.stir(now);
+            self.dirty = true;
+            if key == Key::Power {
+                self.button = Some((key, Press::Spent));
+                return Vec::new();
+            }
+        }
         if let Some((first, at)) = self.chord {
             if matches!((first, key), (Key::Power, Key::VolumeDown) | (Key::VolumeDown, Key::Power)) && now < at + CHORD_MS {
                 return self.screenshot(key, now);
@@ -12240,9 +12268,10 @@ mod tests {
         assert_eq!(app.screen(), Screen::Home, "the lock waits for the screen to sleep");
         press(&mut app, Key::Power, 1000);
         assert_eq!(app.screen(), Screen::Lock);
-        assert!(!app.display_on());
+        assert_eq!(app.panel(1000), Some(0.0), "the light is out");
         press(&mut app, Key::Power, 2000);
         assert!(app.display_on());
+        assert_ne!(app.panel(2000), Some(0.0), "the light is back");
         assert_eq!(app.screen(), Screen::Lock);
         app.lock_entered(Keys::Pattern, "1234".into(), 3000);
         assert_eq!(app.screen(), Screen::Lock, "a wrong pattern keeps it");
@@ -12286,10 +12315,11 @@ mod tests {
         let salt = "0e0f";
         app.state.lock = Some(Lock { kind: "pin".into(), salt: salt.into(), hash: lock_hash("pin", salt, "1234") });
         app.sleep(0);
-        assert!(!app.display_on());
-        // The touch that wakes only lights the panel.
+        assert_eq!(app.panel(0), Some(0.0), "the light is out");
+        // The touch that wakes lights the panel.
         app.touch(Touch::Down(100.0, 100.0), &f, 100);
         assert!(app.display_on());
+        assert_ne!(app.panel(100), Some(0.0), "the light is back");
         assert_eq!(app.screen(), Screen::Lock);
         assert!(app.state.code.is_empty());
         // The next taps work the keypad at once.
