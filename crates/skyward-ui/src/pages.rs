@@ -1066,10 +1066,17 @@ pub fn install(cx: &Ctx) -> Frame {
     let y = widgets::footnote(&mut c, t, f, methods.bottom, what);
     let y = widgets::section(&mut c, t, f, y, l.pick(["选项", "選項", "Options"]));
     let check = Row::new(l.pick(["验证刷机包签名", "驗證刷機包簽章", "Verify zip signatures"])).trail(Trail::Switch(cx.state.check_signature));
-    let signature = widgets::list(&mut c, t, f, y, &[check]);
-    out.extend(hits(&signature.rows, &[Action::Toggle(Switch::Signature)]));
+    let avb = Row::new(l.pick(["去除 AVB 校验", "移除 AVB 校驗", "Remove AVB verification"])).trail(Trail::Switch(cx.state.disable_avb));
+    let signature = widgets::list(&mut c, t, f, y, &[check, avb]);
+    out.extend(hits(&signature.rows, &[Action::Toggle(Switch::Signature), Action::Toggle(Switch::Avb)]));
     let note = l.pick(["开启后，仅安装带有本机官方签名的刷机包。", "開啟後，僅安裝帶有本機官方簽章的刷機包。", "When on, only zips signed with this phone's official keys install."]);
     let mut y = widgets::footnote(&mut c, t, f, signature.bottom, note);
+    let note = l.pick([
+        "开启后，安装完成会把目标槽 vbmeta 的 flags 置为 3，关闭 dm-verity 和 AVB 校验。移植包可能需要；可能影响 OTA 和银行类应用。",
+        "開啟後，安裝完成會把目標槽 vbmeta 的 flags 設為 3，關閉 dm-verity 和 AVB 校驗。移植包可能需要；可能影響 OTA 和銀行類應用。",
+        "When on, the target slot's vbmeta flags are set to 3 after the install, turning off dm-verity and AVB checks. Ported ROMs may need it; OTA and banking apps may be affected.",
+    ]);
+    y = widgets::footnote(&mut c, t, f, y, note);
     if cx.state.recovery_partitions {
         let row = Row::new(l.pick(["自动重新刷入 Skyward", "自動重新刷入 Skyward", "Flash Skyward again"])).trail(Trail::Switch(cx.state.keep_recovery));
         let options = widgets::list(&mut c, t, f, y + t.m.card_gap, &[row]);

@@ -69,6 +69,10 @@ pub struct Options {
     /// A zip with an install script runs only if it was signed with one of
     /// the keys the phone's updates are signed with.
     pub signed: bool,
+    /// Turn off verified boot's checks in the vbmeta of the slot this
+    /// installs to, as fastboot's `--disable-verity --disable-verification`
+    /// does before writing a vbmeta image.
+    pub avb: bool,
 }
 
 /// What the installer tells the screen, in the order it happens.

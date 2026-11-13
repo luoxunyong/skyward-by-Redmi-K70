@@ -22,7 +22,7 @@ use skyward_sys::{kmsg, prop};
 use skyward_vab::{Slot, SlotMaps, SnapshotState};
 use std::collections::HashSet;
 use std::fs::{self, File, OpenOptions};
-use std::io::{self, BufRead, BufReader, ErrorKind, Read, Write};
+use std::io::{self, BufRead, BufReader, ErrorKind, Read, Seek, SeekFrom, Write};
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd, RawFd};
 use std::os::unix::fs::{symlink, PermissionsExt};
 use std::os::unix::process::{CommandExt, ExitStatusExt};
@@ -495,6 +495,11 @@ fn write_whole_payload<S>(ctx: &mut Context, mount: &Mount<S>, update: &Update) 
         &targets,
         &mut |done, total| ctx.send(Event::Progress(Stage::Writing { done, total })),
     )?;
+    if ctx.options.avb {
+        if let Err(e) = disable_avb(slot) {
+            let _ = kmsg(&format!("install: verified boot not turned off: {e:#}"));
+        }
+    }
     if let Some(kept) = &kept {
         reflash(ctx, kept, skyward_vab::boot::next_slot().context("ask which slot starts next"), slot);
     }
@@ -944,6 +949,7 @@ fn run_script(ctx: &mut Context, size: u64, served: impl Fn() -> u64) -> Result<
     let slot = skyward_vab::current_slot()?.context("not an A/B phone")?;
     extract_script()?;
     shell_at_sbin()?;
+    bootctl_shim()?;
     let kept = hold(ctx, slot)?;
     installed_boot_set()?;
     // A package that lays super out again maps its partitions itself, and
@@ -978,6 +984,11 @@ fn run_script(ctx: &mut Context, size: u64, served: impl Fn() -> u64) -> Result<
     };
     let mounted = skyward_block::mount::mount_ids()?;
     let ran = run_binary(ctx, size, &served);
+    if ctx.options.avb {
+        if let Err(e) = disable_avb(slot) {
+            let _ = kmsg(&format!("install: verified boot not turned off: {e:#}"));
+        }
+    }
     if let Err(e) = clean_up(&mounted, &mapped) {
         let _ = kmsg(&format!("install: not all the script left behind was taken away: {e:#}"));
     }
@@ -1059,6 +1070,45 @@ fn lays_super_out_again() -> bool {
         // other one is: the slot mapped for it.
         Err(_) => false,
     }
+}
+
+/// Give scripts written for other recoveries the bootctl they set the
+/// active slot with. The package writes both slots and this recovery sets
+/// the slot its system goes to itself, so the call only has to succeed.
+fn bootctl_shim() -> Result<()> {
+    let body = b"#!/system/bin/sh\nexit 0\n";
+    for name in ["/sbin/bootctl"] {
+        let path = Path::new(name);
+        match fs::symlink_metadata(path) {
+            Ok(_) => continue,
+            Err(e) if e.kind() == ErrorKind::NotFound => {}
+            Err(e) => return Err(e).with_context(|| format!("look at {name}")),
+        }
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent).with_context(|| format!("make {}", parent.display()))?;
+        }
+        fs::write(path, body).with_context(|| format!("write {name}"))?;
+        fs::set_permissions(path, fs::Permissions::from_mode(0o755)).with_context(|| format!("make {name} runnable"))?;
+    }
+    Ok(())
+}
+
+/// Turn off verified boot's checks in `slot`'s top-level vbmeta: the two
+/// flags fastboot sets for --disable-verity --disable-verification. The
+/// signature no longer matches afterwards, which an unlocked bootloader
+/// takes.
+fn disable_avb(slot: Slot) -> Result<()> {
+    let path = Path::new("/dev/block/by-name").join(format!("vbmeta{}", slot.suffix()));
+    let mut file = OpenOptions::new().read(true).write(true).open(&path).with_context(|| format!("open {}", path.display()))?;
+    let mut head = [0u8; 124];
+    file.read_exact(&mut head).with_context(|| format!("read {}", path.display()))?;
+    ensure!(&head[..4] == b"AVB0", "{} is not a vbmeta image", path.display());
+    let flags = u32::from_be_bytes(head[120..124].try_into().expect("four flag bytes")) | 3;
+    file.seek(SeekFrom::Start(120)).with_context(|| format!("seek {}", path.display()))?;
+    file.write_all(&flags.to_be_bytes()).with_context(|| format!("write {}", path.display()))?;
+    file.sync_all().with_context(|| format!("sync {}", path.display()))?;
+    let _ = kmsg(&format!("install: {} flags are now {flags}", path.display()));
+    Ok(())
 }
 
 /// Give scripts written for other recoveries the shell they start with.

@@ -560,6 +560,8 @@ pub enum Switch {
     /// Write Skyward back into the recovery partitions an install writes
     /// over.
     KeepRecovery,
+    /// Turn off verified boot's checks after an install writes its vbmeta.
+    Avb,
     Wlan,
     /// Show the password typed rather than a dot for each character.
     ShowPassword,
@@ -1844,6 +1846,8 @@ pub struct State {
     /// A zip's install script runs only if the zip was signed with one of
     /// the phone's update keys.
     pub check_signature: bool,
+    /// Turn off verified boot's checks after an install writes its vbmeta.
+    pub disable_avb: bool,
     /// The phone keeps its recovery in a partition of each slot, which the
     /// install page then offers to keep Skyward in.
     pub recovery_partitions: bool,
@@ -2014,6 +2018,7 @@ impl Default for State {
             script_output: Vec::new(),
             pace: Pace::default(),
             check_signature: false,
+            disable_avb: false,
             recovery_partitions: false,
             keep_recovery: true,
             reflash: None,
@@ -5574,6 +5579,7 @@ impl App {
                     Switch::Verify => &mut self.state.verify,
                     Switch::Signature => &mut self.state.check_signature,
                     Switch::KeepRecovery => &mut self.state.keep_recovery,
+                    Switch::Avb => &mut self.state.disable_avb,
                     Switch::ShowPassword => &mut self.state.show_password,
                     Switch::Wlan => unreachable!("the WLAN switch is turned above"),
                 };
