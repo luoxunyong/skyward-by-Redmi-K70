@@ -310,6 +310,16 @@ impl Keeper {
             self.standing = None;
             return None;
         }
+        // A lock set or turned off is written at once: a phone restarted
+        // before the wait would come back without it.
+        let lock_changed = match holds.as_ref() {
+            Some(held) => held.lock != show.lock,
+            None => show.lock.is_some(),
+        };
+        if lock_changed && !matches!(&self.standing, Some((_, None))) {
+            self.standing = Some((show.clone(), Some(now)));
+            return Some(show);
+        }
         match &self.standing {
             Some((stood, since)) if *stood == show => since.filter(|&since| now >= since + WAIT_MS).map(|_| show),
             _ => {
@@ -464,4 +474,32 @@ mod tests {
         keeper.due(dark.clone(), 20_000);
         assert_eq!(keeper.due(dark.clone(), 22_000), Some(dark), "erasing takes the file with it, so it is written again");
     }
+
+    #[test]
+    fn the_recovery_lock_goes_round_through_the_file() {
+        let state = State {
+            lock: Some(Lock { kind: "pattern".into(), salt: "abc".into(), hash: "def".into() }),
+            ..State::default()
+        };
+        let kept = Settings::read(&Settings::of(&state).text()).unwrap();
+        let mut back = State::default();
+        kept.apply(&mut back);
+        assert_eq!(back.lock, state.lock);
+    }
+
+    #[test]
+    fn a_lock_is_written_at_once_and_other_changes_wait() {
+        let mut keeper = Keeper::new(&Kept::Nothing);
+        let show = Settings {
+            lock: Some(Lock { kind: "pin".into(), salt: "1".into(), hash: "x".into() }),
+            ..Settings::default()
+        };
+        assert_eq!(keeper.due(show.clone(), 0), Some(show.clone()), "a lock is kept at once");
+        keeper.written(show.clone());
+        let mut dark = show.clone();
+        dark.dark = !dark.dark;
+        assert_eq!(keeper.due(dark.clone(), 10), None);
+        assert_eq!(keeper.due(dark.clone(), 10 + WAIT_MS), Some(dark));
+    }
+
 }

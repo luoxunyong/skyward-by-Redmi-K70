@@ -6484,9 +6484,14 @@ impl App {
     }
 
     pub fn touch(&mut self, ev: Touch, f: &Fonts, now: u64) -> Vec<Effect> {
-        // A finger on the dark panel lights nothing, as on the phone's own
-        // system, where the power key lights it.
+        // A finger on the dark panel lights it, as the phone's own system
+        // does; the touch that wakes it does nothing more, so the page under
+        // it is not worked by a hand reaching for the phone.
         if !self.display_on {
+            if matches!(ev, Touch::Down(..)) {
+                self.wake(now);
+                self.drag = Drag::Waking;
+            }
             return Vec::new();
         }
         // A finger on the charging screen sends it away for the page, and
@@ -6499,7 +6504,7 @@ impl App {
             return Vec::new();
         }
         // A finger landing just after the panel lit only keeps it awake.
-        if matches!(ev, Touch::Down(..)) && self.just_woke(now) {
+        if matches!(ev, Touch::Down(..)) && self.just_woke(now) && self.screen() != Screen::Lock {
             self.stir(now);
             self.drag = Drag::Waking;
             return Vec::new();
@@ -12267,6 +12272,34 @@ mod tests {
         assert_eq!(lock.kind, "pin");
         assert_eq!(lock.hash, lock_hash("pin", &lock.salt, "1234"));
         assert_eq!(app.screen(), Screen::Settings);
+    }
+
+
+    #[test]
+    fn a_touch_wakes_the_locked_panel_and_the_next_works_the_lock() {
+        let (f, i) = (fonts(), info());
+        let mut app = App::new(Screen::Home, W, H, PPD);
+        let salt = "0e0f";
+        app.state.lock = Some(Lock { kind: "pin".into(), salt: salt.into(), hash: lock_hash("pin", salt, "1234") });
+        app.sleep(0);
+        assert!(!app.display_on());
+        // The touch that wakes only lights the panel.
+        app.touch(Touch::Down(100.0, 100.0), &f, 100);
+        assert!(app.display_on());
+        assert_eq!(app.screen(), Screen::Lock);
+        assert!(app.state.code.is_empty());
+        // The next taps work the keypad at once.
+        for (n, ch) in "1234".chars().enumerate() {
+            let (x, y) = spot(&mut app, &f, &i, Action::Type(Cap::Char(ch)));
+            let at = 200 + n as u64 * 10;
+            app.touch(Touch::Down(x, y), &f, at);
+            app.touch(Touch::Up, &f, at);
+        }
+        assert_eq!(app.state.code, "1234");
+        let (x, y) = spot(&mut app, &f, &i, Action::Type(Cap::Enter));
+        app.touch(Touch::Down(x, y), &f, 300);
+        app.touch(Touch::Up, &f, 300);
+        assert_eq!(app.screen(), Screen::Home);
     }
 
 }
