@@ -3398,6 +3398,12 @@ impl App {
         self.display_on
     }
 
+    /// The panel is dark and the recovery's own lock waits behind it: its
+    /// touch controller has to stay awake to light it again.
+    pub fn locked_off(&self) -> bool {
+        !self.display_on && self.state.lock.is_some()
+    }
+
     /// The backlight at `now`: off, or this share of the brightness at the
     /// slider's top, which holds as the content goes dark after the panel
     /// is told to go off.

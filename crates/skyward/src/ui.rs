@@ -1487,6 +1487,7 @@ pub fn run(cfg: &DeviceConfig, font: &Path, mono: &Path, request: bcb::Request, 
             port_at = Instant::now();
         }
         let panel = app.panel(now);
+        let locked_off = app.locked_off();
         let mut shown = false;
         if panel.is_some() {
             // A display turned off comes on again with a frame drawn for it.
@@ -1524,10 +1525,13 @@ pub fn run(cfg: &DeviceConfig, font: &Path, mono: &Path, request: bcb::Request, 
             rested_at = None;
         } else if surface.is_on() {
             // With the backlight off, the panel rests, and the touch
-            // controller following it stops drawing power.
-            surface.rest()?;
-            rested_at = Some(Instant::now());
-        } else if rested_at.is_some_and(|at| at.elapsed() >= REST) {
+            // controller following it stops drawing power — unless the
+            // recovery is locked, whose touch has to light it again.
+            if !locked_off {
+                surface.rest()?;
+                rested_at = Some(Instant::now());
+            }
+        } else if !locked_off && rested_at.is_some_and(|at| at.elapsed() >= REST) {
             // Rested long enough, the display goes off: the panel and the
             // display processor feeding it stop drawing power.
             surface.turn_off()?;
@@ -1569,6 +1573,7 @@ pub fn run(cfg: &DeviceConfig, font: &Path, mono: &Path, request: bcb::Request, 
             None => false,
         };
         let may_sleep = surface.is_off()
+            && !locked_off
             && !busy
             && !fastboot
             && !sideloading
