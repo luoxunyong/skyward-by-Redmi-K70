@@ -5141,6 +5141,11 @@ impl App {
     /// and in a place, until it reaches the place's top.
     fn back(&mut self, now: u64) -> Vec<Effect> {
         let (l, mut fx) = (self.state.lang, Vec::new());
+        // The recovery's lock is answered with its pattern or PIN, not
+        // left: no way back works while it waits.
+        if self.screen() == Screen::Lock && self.state.lock.is_some() && self.state.lock_mode == LockMode::Unlock {
+            return fx;
+        }
         if self.stack.len() <= 1 {
             return fx;
         }
@@ -6724,9 +6729,20 @@ impl App {
                 }
                 Drag::Confirm { which, track, grab } => {
                     let travel = (track.w - track.h).max(1.0);
-                    self.state.confirm = ((x - grab - track.x) / travel).clamp(0.0, 1.0);
-                    self.repaint_confirm(&t, f, which, track);
-                    self.drag = Drag::Confirm { which, track, grab };
+                    let along = ((x - grab - track.x) / travel).clamp(0.0, 1.0);
+                    self.state.confirm = along;
+                    if along > SLID {
+                        // The knob has come to the end: it goes back to its
+                        // place at once and the action goes on, rather than
+                        // waiting at the end for the finger to lift.
+                        self.state.confirm = 0.0;
+                        self.repaint_confirm(&t, f, which, track);
+                        fx.extend(self.confirmed(which, now));
+                        self.drag = Drag::Held;
+                    } else {
+                        self.repaint_confirm(&t, f, which, track);
+                        self.drag = Drag::Confirm { which, track, grab };
+                    }
                 }
                 Drag::Pattern => {
                     self.trace(&t, x, y + scroll);
@@ -9006,8 +9022,8 @@ mod tests {
         let y = track.centre().1;
         app.touch(Touch::Down(track.x + track.h / 2.0, y), &f, 0);
         app.touch(Touch::Move(track.x + track.w / 2.0, y), &f, 0);
-        app.touch(Touch::Move(track.x + track.w, y), &f, 0);
-        let fx = app.touch(Touch::Up, &f, 0);
+        let mut fx = app.touch(Touch::Move(track.x + track.w, y), &f, 0);
+        fx.extend(app.touch(Touch::Up, &f, 0));
         assert_eq!(fx, vec![Effect::Reboot(Target::Bootloader)]);
         assert_eq!(app.state.confirm, 0.0, "the knob springs back");
     }
@@ -9155,8 +9171,9 @@ mod tests {
         let track = app.frame(&f, &i).hits.iter().find(|h| h.action == Action::Confirm(Confirm::Flash)).unwrap().rect;
         let y = track.centre().1 - app.top().1;
         app.touch(Touch::Down(track.x + track.h / 2.0, y), &f, 1000);
-        app.touch(Touch::Move(track.x + track.w, y), &f, 1000);
-        assert_eq!(app.touch(Touch::Up, &f, 1000), vec![Effect::Flash { partition: "boot", pick: Pick::Both }]);
+        let mut fx = app.touch(Touch::Move(track.x + track.w, y), &f, 1000);
+        fx.extend(app.touch(Touch::Up, &f, 1000));
+        assert_eq!(fx, vec![Effect::Flash { partition: "boot", pick: Pick::Both }]);
         assert_eq!(app.state.install, Install::Flashing { partition: "boot", stage: None });
         app.install(Event::Progress(Stage::Flashing { done: 10, total: 40 }), 1000);
         assert_eq!(app.state.install, Install::Flashing { partition: "boot", stage: Some(Stage::Flashing { done: 10, total: 40 }) });
@@ -9757,8 +9774,9 @@ mod tests {
         let track = app.frame(&f, &i).hits.iter().find(|h| h.action == Action::Confirm(Confirm::InstallWipe)).unwrap().rect;
         let y = track.centre().1 - app.top().1;
         app.touch(Touch::Down(track.x + track.h / 2.0, y), &f, 1000);
-        app.touch(Touch::Move(track.x + track.w, y), &f, 1000);
-        assert_eq!(app.touch(Touch::Up, &f, 1000), vec![Effect::Install]);
+        let mut fx = app.touch(Touch::Move(track.x + track.w, y), &f, 1000);
+        fx.extend(app.touch(Touch::Up, &f, 1000));
+        assert_eq!(fx, vec![Effect::Install]);
         assert_eq!(app.state.install, Install::Updating { version: Some("OS3.0.306.0.WMACNXM".into()), stage: None, overwriting: false });
         app.key(Key::Back, 1000);
         assert_eq!(app.screen(), Screen::Installing, "an update being written keeps the page");
@@ -9785,8 +9803,9 @@ mod tests {
         let track = app.frame(&f, &i).hits.iter().find(|h| h.action == Action::Confirm(Confirm::RunScript)).unwrap().rect;
         let y = track.centre().1 - app.top().1;
         app.touch(Touch::Down(track.x + track.h / 2.0, y), &f, 1000);
-        app.touch(Touch::Move(track.x + track.w, y), &f, 1000);
-        assert_eq!(app.touch(Touch::Up, &f, 1000), vec![Effect::Install]);
+        let mut fx = app.touch(Touch::Move(track.x + track.w, y), &f, 1000);
+        fx.extend(app.touch(Touch::Up, &f, 1000));
+        assert_eq!(fx, vec![Effect::Install]);
         assert_eq!(app.state.install, Install::Scripting { stage: None, running: false });
         app.install(Event::Running, 1000);
         for line in ["- Flashing boot", " ", "- Done"] {
@@ -10352,8 +10371,9 @@ mod tests {
         let track = app.frame(&f, &i).hits.iter().find(|h| h.action == Action::Confirm(Confirm::InstallSystem)).unwrap().rect;
         let y = track.centre().1 - app.top().1;
         app.touch(Touch::Down(track.x + track.h / 2.0, y), &f, 1000);
-        app.touch(Touch::Move(track.x + track.w, y), &f, 1000);
-        assert_eq!(app.touch(Touch::Up, &f, 1000), vec![Effect::InstallSystem { size: 8 << 30 }]);
+        let mut fx = app.touch(Touch::Move(track.x + track.w, y), &f, 1000);
+        fx.extend(app.touch(Touch::Up, &f, 1000));
+        assert_eq!(fx, vec![Effect::InstallSystem { size: 8 << 30 }]);
         assert_eq!(app.state.install, Install::Systeming { name: "Ubuntu Touch".into(), stage: None });
         app.install(Event::Progress(Stage::Root { done: 1 << 30, total: 6 << 30 }), 1000);
         assert_eq!(app.state.install, Install::Systeming { name: "Ubuntu Touch".into(), stage: Some(Stage::Root { done: 1 << 30, total: 6 << 30 }) });
@@ -12325,6 +12345,25 @@ mod tests {
         app.touch(Touch::Move(320.0, 1610.0), &f, 4000);
         app.touch(Touch::Up, &f, 4000);
         assert_eq!(app.screen(), Screen::Home, "and the way back still goes home");
+    }
+
+    #[test]
+    fn the_lock_cannot_be_left_by_the_back_key_or_the_edge() {
+        let (f, i) = (fonts(), info());
+        let salt = "0a0b";
+        let mut app = opened(Screen::Settings, &f, &i);
+        app.state.lock = Some(Lock { kind: "pattern".into(), salt: salt.into(), hash: lock_hash("pattern", salt, "1236") });
+        press(&mut app, Key::Power, 1000);
+        assert_eq!(app.screen(), Screen::Lock);
+        app.key(Key::Back, 2000);
+        assert_eq!(app.screen(), Screen::Lock, "the back key does not leave the lock");
+        app.touch(Touch::Down(10.0, 1600.0), &f, 3000);
+        app.touch(Touch::Move(90.0, 1605.0), &f, 3000);
+        app.touch(Touch::Move(320.0, 1610.0), &f, 3000);
+        app.touch(Touch::Up, &f, 3000);
+        assert_eq!(app.screen(), Screen::Lock, "nor does the edge swipe");
+        app.lock_entered(Keys::Pattern, "1236".into(), 4000);
+        assert_eq!(app.screen(), Screen::Settings, "the right pattern opens it");
     }
 
     #[test]
