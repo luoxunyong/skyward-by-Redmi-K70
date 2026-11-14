@@ -32,6 +32,11 @@ pub fn current_protector(database: &Path, user: u32) -> Result<Option<String>> {
 /// or waiting on anyone, since the phone it belongs to is not running; it
 /// is written without a log of its own, so what it holds is all of it.
 fn value(database: &Path, name: &str, user: u32) -> Result<Option<String>> {
+    if !database.exists() {
+        // No lock settings at all: the user set no lock, or this system is
+        // new and has not written them yet.
+        return Ok(None);
+    }
     let at = format!("file:{}?immutable=1", database.display());
     let flags = rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_URI;
     let db = rusqlite::Connection::open_with_flags(&at, flags).with_context(|| format!("open {}", database.display()))?;
@@ -86,10 +91,10 @@ mod tests {
     }
 
     #[test]
-    fn a_value_that_is_no_number_and_a_database_that_is_not_there_are_errors() {
+    fn a_value_that_is_no_number_is_an_error_and_a_database_that_is_not_there_holds_nothing() {
         let at = scratch("odd", &[("sp-handle", 0, Some("behind the sofa"))]);
         assert!(current_protector(&at, 0).is_err());
-        assert!(current_protector(Path::new("/nowhere/locksettings.db"), 0).is_err());
+        assert_eq!(current_protector(Path::new("/nowhere/locksettings.db"), 0).unwrap(), None);
         std::fs::remove_file(&at).unwrap();
     }
 }

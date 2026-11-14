@@ -232,7 +232,13 @@ pub fn open_without_credential(service: &KeyMint) -> Result<Opening> {
     let mut closed = Vec::new();
     let mut owner = Note::default();
     for user in open_users(service)? {
-        let protector = protector(user)?;
+        let Some(protector) = protector(user)? else {
+            let note = open_user_files(service, user, None, None)?;
+            if user == OWNER {
+                owner = note;
+            }
+            continue;
+        };
         match protector.lock {
             None => {
                 let note = open_user_files(service, user, None, None)?;
@@ -351,18 +357,30 @@ const PROTECTORS: &str = "/data/system_de";
 /// credential before can still be used. Which of them the user's current
 /// credential opens is the phone's own business, and it writes that down,
 /// so this reads it rather than guess.
-fn protector(user: u32) -> Result<crate::user::Protector> {
+fn protector(user: u32) -> Result<Option<crate::user::Protector>> {
+    let recorded = crate::locksettings::current_protector(Path::new(crate::locksettings::DATABASE), user)?;
     let dir = blobs(user);
     let mut ids = Vec::new();
-    for entry in std::fs::read_dir(&dir).with_context(|| format!("read {}", dir.display()))? {
-        let path = entry.with_context(|| format!("read {}", dir.display()))?.path();
-        if path.extension().is_some_and(|e| e == "spblob") {
-            if let Some(id) = path.file_stem().and_then(|s| s.to_str()) {
-                ids.push(id.to_string());
+    if dir.is_dir() {
+        for entry in std::fs::read_dir(&dir).with_context(|| format!("read {}", dir.display()))? {
+            let path = entry.with_context(|| format!("read {}", dir.display()))?.path();
+            if path.extension().is_some_and(|e| e == "spblob") {
+                if let Some(id) = path.file_stem().and_then(|s| s.to_str()) {
+                    ids.push(id.to_string());
+                }
             }
         }
     }
-    let id = match crate::locksettings::current_protector(Path::new(crate::locksettings::DATABASE), user)? {
+    // No blob at all: the user set no screen lock, or this system is new
+    // and has made none yet. A lock the phone records but whose blob is
+    // not there is told of rather than taken for no lock.
+    if ids.is_empty() {
+        if recorded.is_some() {
+            anyhow::bail!("the phone records user {user}'s screen lock, but {} holds no blob for it", dir.display());
+        }
+        return Ok(None);
+    }
+    let id = match recorded {
         Some(recorded) => {
             anyhow::ensure!(
                 ids.contains(&recorded),
@@ -401,12 +419,12 @@ fn protector(user: u32) -> Result<crate::user::Protector> {
             std::fs::read(dir.join(format!("{id}.secdis"))).with_context(|| format!("read what the blob in {} is bound to", dir.display()))?,
         ),
     };
-    Ok(crate::user::Protector {
+    Ok(Some(crate::user::Protector {
         blob: std::fs::read(dir.join(format!("{id}.spblob"))).with_context(|| format!("read the blob in {}", dir.display()))?,
         bound,
         id,
         lock,
-    })
+    }))
 }
 
 /// Which of the secure world's slots a user's enrolments sit in. What the
