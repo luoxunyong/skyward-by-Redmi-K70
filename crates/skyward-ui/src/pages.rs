@@ -162,6 +162,7 @@ const REBOOT_TARGETS: [(Text, Option<Text>); 6] = [
 /// titles.
 const WLAN: Text = ["WLAN", "Wi-Fi", "Wi-Fi"];
 const DECRYPT: Text = ["解密", "解密", "Decrypt"];
+const UNLOCK: Text = ["解锁", "解鎖", "Unlock"];
 const ADVANCED: Text = ["高级", "進階", "Advanced"];
 const SETTINGS: Text = ["设置", "設定", "Settings"];
 const REBOOT: Text = ["重启", "重新啟動", "Reboot"];
@@ -821,14 +822,14 @@ fn code(cx: &Ctx, mut c: Canvas, user: u32, keys: Keys, checking: bool) -> Frame
         (false, 0) => l.pick(["输入锁屏密码", "輸入螢幕鎖定密碼", "Enter the screen lock"]).to_string(),
         (false, user) => tr!(l, "输入用户 {user} 的锁屏密码", "輸入使用者 {user} 的螢幕鎖定密碼", "Enter user {user}'s screen lock"),
     };
-    let note = l.pick(if checking { ["正在验证", "正在驗證", "Checking"] } else { ["解密后可查看本机文件", "解密後可查看本機檔案", "Decrypt to see the phone's files"] });
+    let note = l.pick(if checking { ["正在验证", "正在驗證", "Checking"] } else { ["解锁后可查看本机文件", "解鎖後可查看本機檔案", "Unlock to see the phone's files"] });
     c.text_center(&f.heading, &title, x, m.dp(130.0), m.dp(24.0), t.pal.text);
     c.text_center(&f.body, note, x, m.dp(166.0), m.sub_px, t.pal.subtitle);
     let mut pattern = None;
     let bottom = match keys {
         Keys::Letters => {
             let top = m.h as f32 - widgets::keyboard_height(t);
-            let caps = widgets::keyboard(&mut c, t, f, l, top, s.layer, s.key_held(), l.pick(DECRYPT));
+            let caps = widgets::keyboard(&mut c, t, f, l, top, s.layer, s.key_held(), l.pick(UNLOCK));
             if !checking {
                 out.extend(caps.into_iter().map(|(rect, cap)| Hit { rect, action: Action::Type(cap) }));
             }
@@ -861,7 +862,7 @@ fn code(cx: &Ctx, mut c: Canvas, user: u32, keys: Keys, checking: bool) -> Frame
     let skip_cy = bottom - m.dp(34.0);
     c.text_center(&f.heading, l.pick(NOT_NOW), x, skip_cy, m.row_title_px, t.pal.accent);
     out.push(Hit { rect: Rect::new(x - m.dp(80.0), skip_cy - m.dp(24.0), m.dp(160.0), m.dp(48.0)), action: Action::Skip });
-    Frame { header: false, pattern, ..Frame::new(t, c, out, l.pick(DECRYPT), 0.0) }
+    Frame { header: false, pattern, ..Frame::new(t, c, out, l.pick(UNLOCK), 0.0) }
 }
 
 /// The recovery's own lock: choosing what it is, drawing or entering a

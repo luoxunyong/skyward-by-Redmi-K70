@@ -3550,7 +3550,6 @@ impl App {
             if self.screen() != Screen::Lock {
                 self.lock_back = Some(self.screen());
                 self.state.lock_mode = LockMode::Unlock;
-                self.stack.clear();
                 self.stack.push((Screen::Lock, 0.0, Focus::Unset));
                 self.settle_page();
             } else if self.state.lock_mode != LockMode::Unlock {
@@ -6291,8 +6290,24 @@ impl App {
         self.state.code.clear();
         self.state.pattern.clear();
         self.state.lock_mode = LockMode::Unlock;
-        self.stack.clear();
-        self.stack.push((back, 0.0, Focus::Unset));
+        // The lock was pushed over the page it hid: take it away, and that
+        // page comes back with the pages under it, so the way back still
+        // has somewhere to go.
+        if self.screen() == Screen::Lock {
+            self.stack.pop();
+        }
+        if self.stack.is_empty() {
+            self.stack.push((Screen::Home, 0.0, Focus::Unset));
+        }
+        if self.screen() != back {
+            // A lock that was the only page, as when the recovery booted
+            // into it, shows what it hid over Home.
+            self.stack.clear();
+            self.stack.push((Screen::Home, 0.0, Focus::Unset));
+            if back != Screen::Home {
+                self.stack.push((back, 0.0, Focus::Unset));
+            }
+        }
         self.settle_page();
         self.refresh();
     }
@@ -12292,6 +12307,24 @@ mod tests {
         assert_eq!(app.screen(), Screen::Lock, "a wrong pattern keeps it");
         app.lock_entered(Keys::Pattern, "1236".into(), 4000);
         assert_eq!(app.screen(), Screen::Home);
+    }
+
+    #[test]
+    fn a_lock_opened_over_settings_puts_home_back_under_it() {
+        let (f, i) = (fonts(), info());
+        let salt = "0a0b";
+        let mut app = opened(Screen::Settings, &f, &i);
+        app.state.lock = Some(Lock { kind: "pattern".into(), salt: salt.into(), hash: lock_hash("pattern", salt, "1236") });
+        press(&mut app, Key::Power, 1000);
+        assert_eq!(app.screen(), Screen::Lock);
+        press(&mut app, Key::Power, 2000);
+        app.lock_entered(Keys::Pattern, "1236".into(), 3000);
+        assert_eq!(app.screen(), Screen::Settings, "the page under the lock comes back");
+        app.touch(Touch::Down(10.0, 1600.0), &f, 4000);
+        app.touch(Touch::Move(90.0, 1605.0), &f, 4000);
+        app.touch(Touch::Move(320.0, 1610.0), &f, 4000);
+        app.touch(Touch::Up, &f, 4000);
+        assert_eq!(app.screen(), Screen::Home, "and the way back still goes home");
     }
 
     #[test]

@@ -1924,7 +1924,7 @@ pub fn keypad(c: &mut Canvas, t: &Theme, f: &Fonts, l: Lang, top: f32, pressed: 
         match cap {
             Cap::Char(ch) => c.text_center(&f.heading, &ch.to_string(), cx, cy, m.dp(34.0), t.pal.text),
             Cap::Backspace => c.text_center(&f.body, l.pick(["删除", "刪除", "Delete"]), cx, cy, m.row_title_px, t.pal.accent),
-            _ => c.text_center(&f.heading, l.pick(["解密", "解密", "Decrypt"]), cx, cy, m.row_title_px, Rgba::rgb(255, 255, 255)),
+            _ => c.text_center(&f.heading, l.pick(["解锁", "解鎖", "Unlock"]), cx, cy, m.row_title_px, Rgba::rgb(255, 255, 255)),
         }
     }
     keys
