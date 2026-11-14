@@ -960,16 +960,18 @@ fn run_script(ctx: &mut Context, size: u64, served: impl Fn() -> u64) -> Result<
     // and nothing on the slot is held in memory for it either, since what
     // is held keeps its partition from being unmapped at all.
     let remakes_super = lays_super_out_again();
+    // The mounts this recovery keeps to read the installed system are let
+    // go before anything holds a file on them, whether this recovery maps
+    // the slot or the package maps it itself. A mount left standing keeps
+    // its device-mapper device busy, and a package that removes the groups
+    // cannot unmap it: update_dynamic_partitions then fails with
+    // "Device or resource busy".
+    detach_once(ctx)?;
     if remakes_super {
-        // The mounts this recovery keeps to read the installed system are
-        // let go entirely, their device-mapper devices with them, before
-        // anything holds a file on them.
         if let Err(e) = skyward_vab::release_whole(slot) {
             let _ = kmsg(&format!("install: the slot's partitions could not all be let go: {e:#}"));
         }
         let _ = kmsg("install: the package lays super out again, so nothing of the slot is held");
-    } else {
-        detach_once(ctx)?;
     }
     let mapped = match (skyward_vab::snapshot_state()?, remakes_super) {
         (SnapshotState::None, false) => skyward_vab::map_slot(slot)?,
