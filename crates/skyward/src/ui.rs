@@ -1394,6 +1394,9 @@ pub fn run(cfg: &DeviceConfig, font: &Path, mono: &Path, request: bcb::Request, 
     // Asking GitHub for Skyward's newest release, and updating to it.
     let mut skyward_checker: Option<updates::Worker> = None;
     let mut skyward_updater: Option<updates::Worker> = None;
+    // Opening the recovery's lock with the fingerprint sensor.
+    let mut fingerprint: Option<crate::fingerprint::Worker> = None;
+    let mut fingerprint_at: u64 = 0;
     // The phone sleeps while its screen is off and nothing needs it awake.
     let sleeper = Sleeper::start()?;
     // A uevent may be a charger or a computer attached or taken away: the
@@ -1564,6 +1567,7 @@ pub fn run(cfg: &DeviceConfig, font: &Path, mono: &Path, request: bcb::Request, 
             || downloader.is_some()
             || skyward_checker.is_some()
             || skyward_updater.is_some()
+            || fingerprint.is_some()
             || systems_busy;
         let joining = app.state.wlan.as_ref().and_then(|w| w.joined.as_ref()).is_some_and(|j| matches!(j.stage, Joining::Joining | Joining::Addressing));
         let running = match &shell {
@@ -1580,6 +1584,21 @@ pub fn run(cfg: &DeviceConfig, font: &Path, mono: &Path, request: bcb::Request, 
             && asked.is_none()
             && usb_link()? != UsbLink::Connected;
         sleeper.allow(may_sleep);
+        if fingerprint.is_none() && now >= fingerprint_at && app.fingerprint_wanted() {
+            match crate::fingerprint::Worker::start() {
+                Ok(worker) => {
+                    let _ = skyward_sys::kmsg("the fingerprint sensor is asked");
+                    fingerprint = Some(worker);
+                }
+                Err(e) => {
+                    let _ = skyward_sys::kmsg(&format!("the fingerprint sensor did not start: {e:#}"));
+                    fingerprint_at = now + 3000;
+                }
+            }
+        }
+        if fingerprint.is_some() && !app.fingerprint_wanted() {
+            fingerprint = None;
+        }
         let mut fds = vec![inputs.fd(), uevents.fd(), sleeper.fd()];
         if let Some(i) = &installer {
             fds.push(i.fd());
@@ -1625,6 +1644,9 @@ pub fn run(cfg: &DeviceConfig, font: &Path, mono: &Path, request: bcb::Request, 
         }
         if let Some(u) = &skyward_updater {
             fds.push(u.fd());
+        }
+        if let Some(f) = &fingerprint {
+            fds.push(f.fd());
         }
         if let Some(s) = &systems_worker {
             fds.push(s.fd());
@@ -2028,7 +2050,7 @@ pub fn run(cfg: &DeviceConfig, font: &Path, mono: &Path, request: bcb::Request, 
                         app.download_ended(end, have(&app, &release), now);
                         fetched = true;
                     }
-                    updates::Event::Checked(_) | updates::Event::SkywardChecked(_) | updates::Event::SkywardSource(_) | updates::Event::Writing { .. } => {
+                    updates::Event::Checked(_) | updates::Event::SkywardChecked(_) | updates::Event::SkywardSource(_) | updates::Event::SkywardSources(_) | updates::Event::Writing { .. } => {
                         unreachable!("a download asks nothing of its own, and writes nothing")
                     }
                 }
@@ -2055,6 +2077,7 @@ pub fn run(cfg: &DeviceConfig, font: &Path, mono: &Path, request: bcb::Request, 
                 match ev {
                     updates::Event::Progress(progress, rate) => app.skyward_progress(SkywardStage::Download(progress), rate),
                     updates::Event::SkywardSource(source) => app.skyward_source(source),
+                    updates::Event::SkywardSources(sources) => app.skyward_sources(sources),
                     updates::Event::Writing { done, total } => app.skyward_progress(SkywardStage::Write { done, total }, 0),
                     updates::Event::Ended(end) => {
                         let end = match end {
@@ -2075,6 +2098,19 @@ pub fn run(cfg: &DeviceConfig, font: &Path, mono: &Path, request: bcb::Request, 
         }
         if updated {
             skyward_updater = None;
+        }
+        if let Some(worker) = &fingerprint {
+            match worker.ended() {
+                Some(true) => {
+                    app.fingerprint_opened(now);
+                    fingerprint = None;
+                }
+                Some(false) => {
+                    fingerprint_at = now + 1000;
+                    fingerprint = None;
+                }
+                None => {}
+            }
         }
         if let Some(ended) = decryptor.as_ref().and_then(Decryptor::ended) {
             decryptor = None;

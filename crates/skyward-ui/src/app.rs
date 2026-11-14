@@ -551,6 +551,8 @@ pub enum Slider {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Switch {
     Vibrate,
+    /// Open the recovery's lock with the fingerprint sensor.
+    Fingerprint,
     /// Offer internal storage to a computer over USB.
     FileTransfer,
     /// Compress a backup.
@@ -1821,6 +1823,8 @@ pub struct State {
     /// place in [`TIME_ZONES`].
     pub time_zone: usize,
     pub vibrate: bool,
+    /// The recovery's lock may be opened with the fingerprint sensor.
+    pub fingerprint: bool,
     /// How strongly the motor taps, from 0 at the slider's left end to 1
     /// at its right.
     pub vibration: f32,
@@ -1837,6 +1841,9 @@ pub struct State {
     pub pattern: Vec<usize>,
     /// How far the swipe-to-confirm knob is dragged, 0 to 1.
     pub confirm: f32,
+    /// Which of the page's swipe-to-confirm controls the hand is on; only
+    /// that one's knob moves.
+    pub confirming: Option<Confirm>,
     pub install: Install,
     /// Where the package being installed comes from.
     pub source: Source,
@@ -1986,6 +1993,8 @@ pub struct State {
     /// ended.
     pub download: Option<DownloadJob>,
     pub skyward_check: SkywardCheck,
+    /// The GitHub and mirror sources last timed, fastest first.
+    pub skyward_sources: Option<Vec<(String, Option<u64>)>>,
     /// Updating Skyward, or how that last ended.
     pub skyward_job: Option<SkywardJob>,
     /// How fast data went over the network joined in the last second.
@@ -2007,6 +2016,7 @@ impl Default for State {
             rate_chosen: false,
             time_zone: 0,
             vibrate: true,
+            fingerprint: false,
             vibration: SLIDER_START,
             file_transfer: true,
             reboot: 0,
@@ -2015,6 +2025,7 @@ impl Default for State {
             phone_logs: 0,
             pattern: Vec::new(),
             confirm: 0.0,
+            confirming: None,
             install: Install::Idle,
             source: Source::Computer,
             package_name: None,
@@ -2081,6 +2092,7 @@ impl Default for State {
             have: Have::Nothing,
             download: None,
             skyward_check: SkywardCheck::Idle,
+            skyward_sources: None,
             skyward_job: None,
             traffic: Traffic::default(),
         }
@@ -2088,6 +2100,17 @@ impl Default for State {
 }
 
 impl State {
+    /// How far `which`'s knob has been dragged. Only the control the hand
+    /// is on moves, so a second swipe-to-confirm on the page stays at its
+    /// start.
+    pub fn confirm_progress(&self, which: Confirm) -> f32 {
+        if self.confirming == Some(which) {
+            self.confirm
+        } else {
+            0.0
+        }
+    }
+
     /// The key of the on-screen keyboard a finger holds down.
     pub fn key_held(&self) -> Option<Cap> {
         match self.held {
@@ -3335,6 +3358,7 @@ impl App {
             let along = (now.saturating_sub(at) as f32 / SLIDE_MS as f32).min(1.0);
             if along != self.state.confirm {
                 self.state.confirm = along;
+                self.state.confirming = Some(which);
                 self.knob = Some((which, track));
                 self.dirty = true;
             }
@@ -3522,6 +3546,7 @@ impl App {
         match std::mem::replace(&mut self.drag, Drag::Idle) {
             Drag::Confirm { .. } => {
                 self.state.confirm = 0.0;
+                self.state.confirming = None;
                 self.refresh();
             }
             Drag::Pattern => {
@@ -4024,6 +4049,7 @@ impl App {
 
     /// What GitHub answered of Skyward's newest release.
     pub fn skyward_checked(&mut self, answer: Result<Newest, Unanswered>) {
+        self.state.skyward_sources = None;
         self.state.skyward_check = match answer {
             Ok(newest) => SkywardCheck::Answered(newest),
             Err(why) => SkywardCheck::Failed(why),
@@ -4039,6 +4065,14 @@ impl App {
         let job = self.state.skyward_job.as_mut().expect("only an update under way moves on");
         job.stage = Some(stage);
         job.rate = rate;
+        if self.screen() == Screen::SkywardUpdate {
+            self.refresh();
+        }
+    }
+
+    /// The GitHub and mirror sources timed for the update, fastest first.
+    pub fn skyward_sources(&mut self, sources: Vec<(String, Option<u64>)>) {
+        self.state.skyward_sources = Some(sources);
         if self.screen() == Screen::SkywardUpdate {
             self.refresh();
         }
@@ -5600,6 +5634,7 @@ impl App {
             Action::Toggle(switch) => {
                 let on = match switch {
                     Switch::Vibrate => &mut self.state.vibrate,
+                    Switch::Fingerprint => &mut self.state.fingerprint,
                     Switch::FileTransfer => &mut self.state.file_transfer,
                     Switch::Compress => &mut self.state.compress,
                     Switch::Verify => &mut self.state.verify,
@@ -6300,6 +6335,26 @@ impl App {
         }
     }
 
+    /// Whether the lock should be listening for a finger: it is shown,
+    /// the setting asks for it, and the data partition its store is on is
+    /// open.
+    pub fn fingerprint_wanted(&self) -> bool {
+        self.state.fingerprint
+            && self.state.lock.is_some()
+            && self.screen() == Screen::Lock
+            && self.state.lock_mode == LockMode::Unlock
+            && self.display_on
+            && matches!(self.state.data, Data::Open)
+    }
+
+    /// The sensor knew the finger: open the lock.
+    pub fn fingerprint_opened(&mut self, _now: u64) {
+        if self.fingerprint_wanted() {
+            self.lock_opened();
+            self.refresh();
+        }
+    }
+
     /// A right answer takes the lock away and puts the page that was under
     /// it back.
     fn lock_opened(&mut self) {
@@ -6674,7 +6729,11 @@ impl App {
                         self.set_slider(&t, which, track, x);
                         Drag::Slider(which, track)
                     }
-                    Some((Action::Confirm(which), track)) if self.on_knob(track, x) => {
+                    Some((Action::Confirm(which), track)) if self.on_knob(which, track, x) => {
+                        if self.state.confirming != Some(which) {
+                            self.state.confirm = 0.0;
+                        }
+                        self.state.confirming = Some(which);
                         let knob_x = track.x + (track.w - track.h) * self.state.confirm;
                         Drag::Confirm { which, track, grab: x - knob_x }
                     }
@@ -6748,6 +6807,7 @@ impl App {
                 Drag::Confirm { which, track, grab } => {
                     let travel = (track.w - track.h).max(1.0);
                     self.state.confirm = ((x - grab - track.x) / travel).clamp(0.0, 1.0);
+                    self.state.confirming = Some(which);
                     self.repaint_confirm(&t, f, which, track);
                     self.drag = Drag::Confirm { which, track, grab };
                 }
@@ -6814,6 +6874,7 @@ impl App {
                 Drag::Confirm { which, track, .. } => {
                     let done = self.state.confirm > SLID;
                     self.state.confirm = 0.0;
+                    self.state.confirming = None;
                     self.repaint_confirm(&t, f, which, track);
                     if done {
                         fx.extend(self.confirmed(which, now));
@@ -7048,6 +7109,7 @@ impl App {
     /// start of its track.
     fn let_knob_go(&mut self, which: Confirm, track: Rect) {
         self.state.confirm = 0.0;
+        self.state.confirming = None;
         self.knob = Some((which, track));
         self.dirty = true;
     }
@@ -7560,8 +7622,8 @@ impl App {
         self.pull = next - top.1;
     }
 
-    fn on_knob(&self, track: Rect, x: f32) -> bool {
-        let knob_x = track.x + (track.w - track.h) * self.state.confirm;
+    fn on_knob(&self, which: Confirm, track: Rect, x: f32) -> bool {
+        let knob_x = track.x + (track.w - track.h) * self.state.confirm_progress(which);
         x >= knob_x && x <= knob_x + track.h
     }
 
@@ -7605,7 +7667,7 @@ impl App {
         let (label, danger) = pages::confirm_label(which, &self.state);
         if let Some(fr) = self.frame.as_mut() {
             fr.canvas.fill_rect(track.x, track.y, track.w, track.h, t.pal.bg);
-            widgets::confirm(&mut fr.canvas, t, f, track.y, label, danger, self.state.confirm);
+            widgets::confirm(&mut fr.canvas, t, f, track.y, label, danger, self.state.confirm_progress(which));
         }
         self.layer = None;
     }
@@ -10215,6 +10277,30 @@ mod tests {
         assert_eq!(app.screen(), Screen::RestoreBackup, "not deleted, the page stays and says why");
         assert_eq!(app.backup_deleted(Ok(()), 0), vec![Effect::FindBackups { storage: true, usb: false }]);
         assert_eq!((app.screen(), app.state.restore.clone()), (Screen::Restore, None));
+    }
+
+    #[test]
+    fn dragging_the_delete_backup_confirm_leaves_the_restore_confirm_still() {
+        let (f, i) = (fonts(), info());
+        let mut app = opened(Screen::Restore, &f, &i);
+        app.data_waiting(None);
+        let entry = found(Place::Storage, 1_792_348_260, [true; 4]);
+        app.set_backups(vec![entry]);
+        tap(&mut app, &f, &i, Action::OpenBackup(0));
+        tap(&mut app, &f, &i, Action::AskDelete);
+        let track = app
+            .frame(&f, &i)
+            .hits
+            .iter()
+            .find(|h| h.action == Action::Confirm(Confirm::DeleteBackup))
+            .expect("the delete confirm")
+            .rect;
+        let y = track.centre().1 - app.top().1;
+        app.touch(Touch::Down(track.x + track.h / 2.0, y), &f, 0);
+        app.touch(Touch::Move(track.x + track.w / 2.0, y), &f, 0);
+        assert!(app.state.confirm_progress(Confirm::DeleteBackup) > 0.0, "the delete knob follows the hand");
+        assert_eq!(app.state.confirm_progress(Confirm::Restore), 0.0, "the restore knob stays at its start");
+        app.touch(Touch::Up, &f, 0);
     }
 
     #[test]

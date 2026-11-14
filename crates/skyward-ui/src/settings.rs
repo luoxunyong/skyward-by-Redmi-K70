@@ -53,6 +53,8 @@ pub struct Settings {
     /// The time zone, by its name in the tz database.
     pub time_zone: String,
     pub vibrate: bool,
+    /// The recovery's lock may be opened with the fingerprint sensor.
+    pub fingerprint: bool,
     /// The vibration slider's place, from 0 at its left end to 1.
     pub vibration: f32,
     /// A computer connected over USB is offered internal storage.
@@ -159,6 +161,7 @@ impl Settings {
             refresh_rate: state.rate_chosen.then(|| REFRESH_RATES[state.refresh_rate]),
             time_zone: TIME_ZONES[state.time_zone].2.to_string(),
             vibrate: state.vibrate,
+            fingerprint: state.fingerprint,
             vibration: state.vibration,
             file_transfer: state.file_transfer,
             install: Install { check_signature: state.check_signature, keep_recovery: state.keep_recovery },
@@ -226,6 +229,7 @@ impl Settings {
             }
         }
         state.vibrate = self.vibrate;
+        state.fingerprint = self.fingerprint;
         if (0.0..=1.0).contains(&self.vibration) {
             state.vibration = self.vibration;
         }

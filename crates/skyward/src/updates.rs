@@ -57,6 +57,8 @@ pub enum Event {
     /// The source the build is downloaded from, named with how long it took
     /// to answer.
     SkywardSource(String),
+    /// Every source, the fastest first, with how long each took to answer.
+    SkywardSources(Vec<(String, Option<u64>)>),
     /// How far the download has come, and how fast it goes, in bytes a
     /// second.
     Progress(Progress, u64),
@@ -184,7 +186,8 @@ impl Worker {
                             }
                         };
                         let sum = Sum::Sha256(build.sha256.clone());
-                        let (sources, source) = fastest(&servers, build.sources(located), &build.link);
+                        let (sources, source, list) = fastest(&servers, build.sources(located), &build.link);
+                        tell(Event::SkywardSources(list));
                         tell(Event::SkywardSource(source));
                         let end = match fetch(&servers, sources, &sum, &build.name, &path, &stopping, &using, &tell, &mut refused) {
                             // Stopping asked for as the last of it came is
@@ -359,7 +362,7 @@ fn fetch(
 /// Ask every source at once how long it takes to answer, put the fastest
 /// first, and name it with its time for the page. A source that does not
 /// answer goes last, where the download still tries it before giving up.
-fn fastest(servers: &Servers, sources: Vec<String>, link: &str) -> (Vec<String>, String) {
+fn fastest(servers: &Servers, sources: Vec<String>, link: &str) -> (Vec<String>, String, Vec<(String, Option<u64>)>) {
     let probed = std::thread::scope(|scope| {
         let handles: Vec<_> = sources
             .into_iter()
@@ -387,7 +390,11 @@ fn fastest(servers: &Servers, sources: Vec<String>, link: &str) -> (Vec<String>,
         Some((url, Some(ms))) => format!("{} · {} ms", github::source_name(url, link), ms.as_millis()),
         _ => "GitHub".to_string(),
     };
-    (probed.into_iter().map(|(url, _)| url).collect(), source)
+    let list = probed
+        .iter()
+        .map(|(url, ms)| (github::source_name(url, link), ms.map(|ms| ms.as_millis() as u64)))
+        .collect();
+    (probed.into_iter().map(|(url, _)| url).collect(), source, list)
 }
 
 /// Write the image in the zip at `path`, once it is Skyward for the phone

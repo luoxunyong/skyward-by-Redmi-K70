@@ -396,10 +396,17 @@ pub fn settings(cx: &Ctx) -> Frame {
         // settings say which.
         Row::new(l.pick(HOUR_FORMAT)).icon(ORANGE, Icon::Clock).trail(Trail::Switch(s.hour24)),
         Row::new(l.pick(["Recovery 锁屏", "Recovery 鎖屏", "Recovery lock"])).icon(SLATE, Icon::Lock).trail(Trail::Value(lock)),
+        Row::new(l.pick(["指纹解锁", "指紋解鎖", "Fingerprint unlock"])).icon(SLATE, Icon::Lock).trail(Trail::Switch(s.fingerprint)),
     ]);
     out.extend(hits(
         &general.rows,
-        &[Action::Open(Screen::Language), Action::Open(Screen::TimeZone), Action::Hour24(!s.hour24), Action::OpenLockSetup],
+        &[
+            Action::Open(Screen::Language),
+            Action::Open(Screen::TimeZone),
+            Action::Hour24(!s.hour24),
+            Action::OpenLockSetup,
+            Action::Toggle(Switch::Fingerprint),
+        ],
     ));
     y = widgets::section(&mut c, t, f, general.bottom, "USB");
     let usb = widgets::list(&mut c, t, f, y, &[Row::new(l.pick(["文件传输", "檔案傳輸", "File transfer"])).icon(BLUE, Icon::Usb).trail(Trail::Switch(s.file_transfer))]);
@@ -918,8 +925,22 @@ pub fn lock(cx: &Ctx) -> Frame {
         LockMode::Unlock => {
             let kind = s.lock.as_ref().and_then(Lock::keys).unwrap_or(Keys::Digits);
             let (title, note) = match kind {
-                Keys::Pattern => (l.pick(["绘制图案解锁", "繪製圖案解鎖", "Draw the pattern"]), l.pick(["解锁后才能继续使用 recovery", "解鎖後才能繼續使用 recovery", "Unlock to use the recovery"])),
-                _ => (l.pick(["输入 PIN 解锁", "輸入 PIN 解鎖", "Enter the PIN"]), l.pick(["解锁后才能继续使用 recovery", "解鎖後才能繼續使用 recovery", "Unlock to use the recovery"])),
+                Keys::Pattern => (
+                    l.pick(["绘制图案解锁", "繪製圖案解鎖", "Draw the pattern"]),
+                    if s.fingerprint {
+                        l.pick(["触摸指纹传感器，或绘制图案", "觸碰指紋感應器，或繪製圖案", "Touch the sensor, or draw the pattern"])
+                    } else {
+                        l.pick(["解锁后才能继续使用 recovery", "解鎖後才能繼續使用 recovery", "Unlock to use the recovery"])
+                    },
+                ),
+                _ => (
+                    l.pick(["输入 PIN 解锁", "輸入 PIN 解鎖", "Enter the PIN"]),
+                    if s.fingerprint {
+                        l.pick(["触摸指纹传感器，或输入 PIN", "觸碰指紋感應器，或輸入 PIN", "Touch the sensor, or enter the PIN"])
+                    } else {
+                        l.pick(["解锁后才能继续使用 recovery", "解鎖後才能繼續使用 recovery", "Unlock to use the recovery"])
+                    },
+                ),
             };
             lock_entry(cx, c, kind, title, note, false)
         }
@@ -2212,7 +2233,7 @@ pub fn restore_backup(cx: &Ctx) -> Frame {
                     }
                 }
                 let (label, danger) = confirm_label(Confirm::Restore, cx.state);
-                let track = widgets::confirm(&mut c, t, f, y + t.m.dp(24.0), label, danger, s.confirm);
+                let track = widgets::confirm(&mut c, t, f, y + t.m.dp(24.0), label, danger, s.confirm_progress(Confirm::Restore));
                 out.push(Hit { rect: track, action: Action::Confirm(Confirm::Restore) });
                 track.y + track.h
             }
@@ -2225,7 +2246,7 @@ pub fn restore_backup(cx: &Ctx) -> Frame {
         let ask = l.pick(["删除该备份？删除后无法恢复。", "刪除這份備份？刪除後無法復原。", "Delete this backup? It can't be brought back."]);
         let y = widgets::footnote(&mut c, t, f, delete.bottom, ask);
         let (label, danger) = confirm_label(Confirm::DeleteBackup, cx.state);
-        let track = widgets::confirm(&mut c, t, f, y + t.m.dp(24.0), label, danger, s.confirm);
+        let track = widgets::confirm(&mut c, t, f, y + t.m.dp(24.0), label, danger, s.confirm_progress(Confirm::DeleteBackup));
         out.push(Hit { rect: track, action: Action::Confirm(Confirm::DeleteBackup) });
         bottom = track.y + track.h;
     }
@@ -2975,6 +2996,26 @@ pub fn skyward_update(cx: &Ctx) -> Frame {
     let y = widgets::info_card(&mut c, t, f, y, &[(l.pick(["当前版本", "目前版本", "Current version"]), VERSION.to_string())]);
     let y = widgets::section(&mut c, t, f, y, l.pick(["在线更新", "線上更新", "Online update"]));
     let y = skyward_online(&mut c, cx, y, &mut out);
+    let y = match &cx.state.skyward_sources {
+        Some(sources) if !sources.is_empty() => {
+            let y = widgets::section(&mut c, t, f, y, l.pick(["下载源", "下載來源", "Download sources"]));
+            let took: Vec<String> = sources
+                .iter()
+                .map(|(_, ms)| match ms {
+                    Some(ms) => format!("{ms} ms"),
+                    None => l.pick(["超时", "逾時", "Timed out"]).to_string(),
+                })
+                .collect();
+            let rows: Vec<Row> = sources
+                .iter()
+                .zip(&took)
+                .enumerate()
+                .map(|(i, ((name, _), took))| Row::new(name).subtitle(took).trail(Trail::Check(i == 0)))
+                .collect();
+            widgets::list(&mut c, t, f, y, &rows).bottom
+        }
+        _ => y,
+    };
     let points = [
         l.pick([
             "新版本从 GitHub 下载，校验 SHA-256 后写入 recovery 分区，不会改动系统和用户数据。",
