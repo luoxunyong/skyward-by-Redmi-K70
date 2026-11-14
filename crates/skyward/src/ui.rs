@@ -147,7 +147,7 @@ fn set_touch_awake(on: bool) -> bool {
         let power = path.join("device/power");
         let _ = fs::write(power.join("control"), if on { "on" } else { "auto" });
         let _ = fs::write(power.join("wakeup"), if on { "enabled" } else { "disabled" });
-        let _ = kmsg(&format!("touch: {name} {}", if on { "kept awake" } else { "let rest" }));
+        let _ = skyward_sys::kmsg(&format!("touch: {name} {}", if on { "kept awake" } else { "let rest" }));
     }
     found
 }
