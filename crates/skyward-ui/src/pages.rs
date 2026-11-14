@@ -147,7 +147,7 @@ pub fn confirm_label(which: Confirm, s: &State) -> (&'static str, bool) {
 /// The home page's large title, and what its search bar and the search
 /// page's field say while nothing is typed.
 pub const HOME_TITLE: &str = "Skyward";
-pub const SEARCH_HINT: Text = ["搜索功能与分区", "搜尋功能與分割區", "Search features and partitions"];
+pub const SEARCH_HINT: Text = ["搜索功能、分区与设置", "搜尋功能、分割區與設定", "Search features, partitions and settings"];
 
 const REBOOT_TARGETS: [(Text, Option<Text>); 6] = [
     (["系统", "系統", "System"], None),
@@ -967,7 +967,10 @@ fn lock_entry(cx: &Ctx, mut c: Canvas, keys: Keys, title: &str, note: &str, sett
             m.h as f32 - m.dp(26.0)
         }
         _ => {
-            let top = m.h as f32 - widgets::keypad_height(t);
+            // The sensor sits under the lower part of the pad; with the
+            // fingerprint asked for, lift the pad clear of it.
+            let lift = if s.fingerprint && !setting { m.dp(120.0) } else { 0.0 };
+            let top = m.h as f32 - widgets::keypad_height(t) - lift;
             let caps = widgets::keypad(&mut c, t, f, l, top, s.key_held());
             out.extend(caps.into_iter().map(|(rect, cap)| Hit { rect, action: Action::Type(cap) }));
             widgets::code_dots(&mut c, t, x, top - m.dp(92.0), s.code.chars().count());
@@ -2995,7 +2998,6 @@ pub fn skyward_update(cx: &Ctx) -> Frame {
     let y = widgets::section_first(&mut c, t, f, top, l.pick(["本机", "本機", "This phone"]));
     let y = widgets::info_card(&mut c, t, f, y, &[(l.pick(["当前版本", "目前版本", "Current version"]), VERSION.to_string())]);
     let y = widgets::section(&mut c, t, f, y, l.pick(["在线更新", "線上更新", "Online update"]));
-    let y = skyward_online(&mut c, cx, y, &mut out);
     let y = match &cx.state.skyward_sources {
         Some(sources) if !sources.is_empty() => {
             let y = widgets::section(&mut c, t, f, y, l.pick(["下载源", "下載來源", "Download sources"]));
@@ -3016,6 +3018,7 @@ pub fn skyward_update(cx: &Ctx) -> Frame {
         }
         _ => y,
     };
+    let y = skyward_online(&mut c, cx, y, &mut out);
     let points = [
         l.pick([
             "新版本从 GitHub 下载，校验 SHA-256 后写入 recovery 分区，不会改动系统和用户数据。",

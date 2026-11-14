@@ -157,6 +157,12 @@ impl Worker {
                         let a = http::agent(servers.clone());
                         *using.lock().expect("the agent is not held by a thread that panicked") = Some(a.clone());
                         let answer = github::ask(&a, &codename, skyward_info::VERSION).map_err(|e| unanswered(&e, github::LATEST, &probe, &servers));
+                        if let Ok(newest) = &answer {
+                            if let Some(build) = &newest.build {
+                                let (_, _, list) = fastest(&servers, build.sources(None), &build.link);
+                                tell(Event::SkywardSources(list));
+                            }
+                        }
                         tell(Event::SkywardChecked(answer));
                     }
                     // GitHub's API hands the zip out at a short-lived address

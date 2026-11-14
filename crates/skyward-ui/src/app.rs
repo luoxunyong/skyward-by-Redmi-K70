@@ -4049,7 +4049,6 @@ impl App {
 
     /// What GitHub answered of Skyward's newest release.
     pub fn skyward_checked(&mut self, answer: Result<Newest, Unanswered>) {
-        self.state.skyward_sources = None;
         self.state.skyward_check = match answer {
             Ok(newest) => SkywardCheck::Answered(newest),
             Err(why) => SkywardCheck::Failed(why),
@@ -5537,6 +5536,7 @@ impl App {
             // Skyward's own page asks GitHub the same way.
             Screen::SkywardUpdate if matches!(self.state.skyward_check, SkywardCheck::Idle | SkywardCheck::Failed(_)) && self.state.online() => {
                 self.state.skyward_check = SkywardCheck::Asking;
+                self.state.skyward_sources = None;
                 vec![Effect::CheckSkyward]
             }
             Screen::Wlan if self.state.wlan.as_ref().is_some_and(|w| w.power == Power::On) => vec![Effect::ScanWlan],
@@ -6126,6 +6126,7 @@ impl App {
                 }
                 if self.state.skyward_check != SkywardCheck::Asking {
                     self.state.skyward_check = SkywardCheck::Asking;
+                    self.state.skyward_sources = None;
                     self.refresh();
                     return vec![Effect::CheckSkyward];
                 }

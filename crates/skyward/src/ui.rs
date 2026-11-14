@@ -2062,10 +2062,15 @@ pub fn run(cfg: &DeviceConfig, font: &Path, mono: &Path, request: bcb::Request, 
         let mut asked = false;
         if let Some(c) = &skyward_checker {
             for ev in c.events() {
-                let updates::Event::SkywardChecked(answer) = ev else { unreachable!("asking GitHub downloads nothing") };
-                skyward_sys::kmsg(&format!("GitHub told of Skyward's newest release: {answer:?}"))?;
-                app.skyward_checked(answer);
-                asked = true;
+                match ev {
+                    updates::Event::SkywardChecked(answer) => {
+                        skyward_sys::kmsg(&format!("GitHub told of Skyward's newest release: {answer:?}"))?;
+                        app.skyward_checked(answer);
+                        asked = true;
+                    }
+                    updates::Event::SkywardSources(sources) => app.skyward_sources(sources),
+                    _ => unreachable!("asking GitHub downloads nothing else"),
+                }
             }
         }
         if asked {

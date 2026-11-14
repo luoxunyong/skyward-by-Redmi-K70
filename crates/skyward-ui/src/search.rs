@@ -38,8 +38,12 @@ const HOME: Text = ["主页", "主頁", "Home"];
 const INSTALL: Text = ["安装", "安裝", "Install"];
 const ADVANCED: Text = ["高级", "進階", "Advanced"];
 const SETTINGS: Text = ["设置", "設定", "Settings"];
+const SKYWARD: Text = ["Skyward 更新", "Skyward 更新", "Skyward update"];
 const MOUNT: Text = ["挂载", "掛載", "Mount"];
 
+// Every feature or setting the pages gain gets an entry here: its title in
+// every language, where it lives, what touching it opens, and the pinyin,
+// initials and English it answers to. Keep this list beside the feature.
 pub const ENTRIES: &[Entry] = &[
     entry(["WLAN", "Wi-Fi", "Wi-Fi"], HOME, Screen::Wlan, &["wuxianwangluo", "wxwl", "wangluo", "wl", "lianwang", "wifi", "wlan"]),
     entry(
@@ -91,6 +95,12 @@ pub const ENTRIES: &[Entry] = &[
         Action::OpenLockSetup,
         &["recoverylock", "recoverylockscreen", "suoping", "sp", "lock", "mima", "mm", "pin", "tuxing", "tx", "pattern", "screenlock", "password"],
     ),
+    entry(
+        ["指纹解锁", "指紋解鎖", "Fingerprint unlock"],
+        SETTINGS,
+        Screen::Settings,
+        &["zhiwenjiesuo", "zwjs", "zhiwen", "zw", "fingerprint", "finger", "sensor", "touchid"],
+    ),
     entry(["文件传输", "檔案傳輸", "File transfer"], SETTINGS, Screen::Settings, &["wenjianchuanshu", "wjcs", "chuanshu", "mtp", "usb"]),
     entry(["语言", "語言", "Language"], SETTINGS, Screen::Language, &["yuyan", "yy", "language", "fanti", "jianti", "english"]),
     entry(["时区", "時區", "Time zone"], SETTINGS, Screen::TimeZone, &["shiqu", "sq", "timezone"]),
@@ -102,6 +112,12 @@ pub const ENTRIES: &[Entry] = &[
         SETTINGS,
         Screen::SkywardUpdate,
         &["skywardgengxin", "skywardgx", "shengji", "xiazai", "update", "upgrade", "release", "github"],
+    ),
+    entry(
+        ["GitHub 镜像源", "GitHub 鏡像來源", "GitHub mirrors"],
+        SKYWARD,
+        Screen::SkywardUpdate,
+        &["githubjingxiang", "githubjx", "jingxiang", "jx", "mirror", "mirrors", "suyuan", "source", "latency", "yanshi", "ys"],
     ),
     entry(
         ["全部参数与信息", "全部規格與資訊", "All specs"],
@@ -244,6 +260,14 @@ mod tests {
         assert_eq!(find("mima", Lang::Hans).first().map(|e| e.action), Some(Action::OpenLockSetup));
         assert_eq!(find("pattern", Lang::En).first().map(|e| e.action), Some(Action::OpenLockSetup));
         assert_eq!(find("lock", Lang::En).first().map(|e| e.action), Some(Action::OpenLockSetup));
+    }
+
+    #[test]
+    fn the_new_settings_and_sources_are_found() {
+        assert_eq!(find("zhiwen", Lang::Hans).first().map(|e| e.title[0]), Some("指纹解锁"));
+        assert_eq!(find("fingerprint", Lang::En).first().map(|e| e.title[2]), Some("Fingerprint unlock"));
+        assert_eq!(find("jingxiang", Lang::Hans).first().map(|e| e.title[0]), Some("GitHub 镜像源"));
+        assert_eq!(find("mirror", Lang::En).first().map(|e| e.title[2]), Some("GitHub mirrors"));
     }
 
     #[test]
