@@ -232,7 +232,14 @@ impl Plan {
         let device = fstab::device(&self.data).map_err(failed(Step::Data))?;
         match &self.reformat {
             Some(filesystem) => erase::make(Path::new(&device), filesystem, &self.data.extras, casefolds(&self.data)),
-            None => erase::discard(Path::new(&device)),
+            None => {
+                erase::discard(Path::new(&device)).map_err(failed(Step::Data))?;
+                // The system makes the data afresh under a new key when it
+                // next starts, but the recovery may be used before that:
+                // make the empty filesystem it names now, so the data opens
+                // here. The system still makes it afresh on its first start.
+                erase::make(Path::new(&device), &self.data.filesystem, &self.data.extras, casefolds(&self.data))
+            }
         }
         .map_err(failed(Step::Data))?;
         let made_as = |entry: &Entry| self.reformat.clone().unwrap_or_else(|| entry.filesystem.clone());

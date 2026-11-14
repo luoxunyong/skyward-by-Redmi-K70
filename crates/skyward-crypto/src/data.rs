@@ -131,6 +131,15 @@ fn open(service: &KeyMint) -> Result<Opened> {
     }
 }
 
+/// Whether the start of the raw data partition is all zeros: a factory
+/// reset discarded it, and no filesystem has been made since.
+fn zeroed(device: &str) -> bool {
+    use std::io::Read;
+    let Ok(mut file) = std::fs::File::open(device) else { return false };
+    let mut head = vec![0u8; 1 << 20];
+    file.read_exact(&mut head).is_ok_and(|()| head.iter().all(|b| *b == 0))
+}
+
 /// Map the data partition decrypted, under the key the phone keeps for it,
 /// and give its table's entries, the first the one the key is found by,
 /// and the device the filesystem is read and written through.
@@ -143,12 +152,24 @@ fn map(service: &KeyMint) -> Result<(Vec<Entry>, PathBuf)> {
     // the raw partition holds says which entry is the one; an entry
     // without metadata_encryption is mounted as it is, with no key asked
     // for and no device-mapper over it.
-    let holds = skyward_block::probe::filesystem(Path::new(&first_device)).ok().flatten();
+    let mut holds = skyward_block::probe::filesystem(Path::new(&first_device)).ok().flatten();
+    // A data partition a factory reset discarded has no filesystem and no
+    // metadata key: make the empty filesystem the table names here, so the
+    // recovery can use it before the system next starts.
+    if holds.is_none() && zeroed(&first_device) {
+        skyward_block::erase::make(Path::new(&first_device), &first.filesystem, &first.extras, false)
+            .context("make the data partition afresh")?;
+        holds = skyward_block::probe::filesystem(Path::new(&first_device)).ok().flatten();
+    }
     let entry = entries.iter().find(|e| holds.as_deref() == Some(e.filesystem.as_str())).unwrap_or(first);
     let device = skyward_block::fstab::device(entry)?;
-    let mapped = match entry.extra("metadata_encryption") {
-        None => PathBuf::from(device),
-        Some(_) => {
+    // A partition the system has not encrypted yet, as just after a
+    // format, already holds its filesystem on the raw device. There is no
+    // metadata key to unwrap then; mount what is there.
+    let raw = holds.as_deref() == Some(entry.filesystem.as_str());
+    let mapped = match (raw, entry.extra("metadata_encryption")) {
+        (true, _) | (false, None) => PathBuf::from(device),
+        (false, Some(_)) => {
             let encryption = Encryption::of(entry)?;
             let key = storage_key(service, entry, &encryption)?;
             let sectors = skyward_block::size_bytes(&device)? / 512;
@@ -228,10 +249,17 @@ pub fn open_without_credential(service: &KeyMint) -> Result<Opening> {
         true => None,
         false => Some(open(service)?),
     };
-    open_shared(service)?;
+    // A data partition formatted and not yet started by the system has no
+    // shared key and no user keys. Nothing there is encrypted; open it as
+    // it is rather than asking for keys that were never made.
+    let fresh = fresh();
+    if !fresh {
+        open_shared(service)?;
+    }
     let mut closed = Vec::new();
     let mut owner = Note::default();
-    for user in open_users(service)? {
+    let users = if fresh { Vec::new() } else { open_users(service)? };
+    for user in users {
         let Some(protector) = protector(user)? else {
             let note = open_user_files(service, user, None, None)?;
             if user == OWNER {
@@ -330,6 +358,12 @@ fn users() -> Result<Vec<u32>> {
     }
     users.sort_unstable();
     Ok(users)
+}
+
+/// Whether the data partition has no encryption keys yet: it was
+/// formatted and the installed system has not made them.
+fn fresh() -> bool {
+    !Path::new(FILE_MODE).exists() && !Path::new(USER_KEYS).join("de").exists()
 }
 
 /// Let in the keys for the files of each user that are readable before
