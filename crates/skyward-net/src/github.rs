@@ -119,6 +119,11 @@ pub fn probe(agent: &ureq::Agent, url: &str) -> Option<Duration> {
 #[derive(Deserialize)]
 struct Release {
     tag_name: String,
+    /// When GitHub published it, as `2026-11-14T20:21:24Z`. GitHub does
+    /// not always list a release published minutes ago above the one
+    /// before it, so the newest is chosen by this time.
+    #[serde(default)]
+    published_at: Option<String>,
     assets: Vec<Asset>,
 }
 
@@ -153,11 +158,14 @@ fn newest_with(answer: &str, codename: &str, running: &str, running_build: &str)
     newest_release(release, codename, running, running_build)
 }
 
-/// The first release in `answer`, GitHub's answer at [`LATEST`], which
-/// lists them newest first, and its zip for the phone `codename` names.
+/// The release in `answer`, GitHub's answer at [`LATEST`], published
+/// latest, and its zip for the phone `codename` names.
 fn newest_releases(answer: &str, codename: &str, running: &str, running_build: &str) -> Result<Newest> {
     let releases: Vec<Release> = serde_json::from_str(answer).context("read GitHub's answer")?;
-    let release = releases.into_iter().next().context("GitHub names no release")?;
+    let release = releases
+        .into_iter()
+        .max_by(|a, b| a.published_at.as_deref().cmp(&b.published_at.as_deref()))
+        .context("GitHub names no release")?;
     newest_release(release, codename, running, running_build)
 }
 
@@ -240,7 +248,7 @@ fn ask_page(agent: &ureq::Agent, codename: &str, running: &str, build: &str) -> 
     let status = response.status();
     let body = response.body_mut().read_to_string().with_context(|| format!("read {PAGE}"))?;
     ensure!(status.is_success(), "{PAGE} answered {status}");
-    let tag = first_tag(&body).with_context(|| format!("{PAGE} names no release"))?;
+    let tag = newest_tag(&body).with_context(|| format!("{PAGE} names no release"))?;
     let url = format!("https://github.com/luoxunyong/skyward-by-Redmi-K70/releases/expanded_assets/{tag}");
     let mut response = agent
         .get(&url)
@@ -255,8 +263,37 @@ fn ask_page(agent: &ureq::Agent, codename: &str, running: &str, build: &str) -> 
     Ok(Newest { version, newer, build })
 }
 
-/// The tag of the newest release on the releases page. Its table of
-/// contents names it first, and its own link does too.
+/// The tag of the newest release on the releases page, by the time each
+/// card says it was published. GitHub can list a release published minutes
+/// ago below the one before it.
+fn newest_tag(html: &str) -> Option<String> {
+    let mut newest: Option<(&str, &str)> = None;
+    let mut rest = html;
+    while let Some(at) = rest.find("id=\"release-") {
+        let after = &rest[at + "id=\"release-".len()..];
+        let Some(end) = after.find('"') else { break };
+        let tag = &after[..end];
+        let after_id = at + "id=\"release-".len() + end;
+        let card = &rest[after_id..];
+        let card_end = card.find("id=\"release-").unwrap_or(card.len());
+        let card = &card[..card_end];
+        if tag != "filter" {
+            if let Some(time) = between(card, "datetime=\"", "\"") {
+                if newest.is_none_or(|(_, t)| time > t) {
+                    newest = Some((tag, time));
+                }
+            }
+        }
+        rest = &rest[after_id + card_end..];
+    }
+    match newest {
+        Some((tag, _)) => Some(tag.to_string()),
+        None => first_tag(html),
+    }
+}
+
+/// The tag of the first release on the releases page, where its cards say
+/// no time.
 fn first_tag(html: &str) -> Option<String> {
     const ANCHOR: &str = "\"anchorId\":\"release-";
     if let Some(at) = html.find(ANCHOR) {
@@ -488,15 +525,22 @@ mod tests {
     }
 
     #[test]
-    fn a_release_list_is_read_newest_first() {
+    fn a_release_list_is_read_by_when_its_releases_were_published() {
         let list = format!("[{ANSWERED_013}]");
         assert_eq!(newest_releases(&list, "ishtar", "0.1.2", "").unwrap().version, "0.1.3");
+        // GitHub listed the build published at 19:53 above the one at
+        // 20:21, so the time, not the place, says which is newest.
+        let list = r#"[
+            {"tag_name":"build-7d47475-20261114-195313","published_at":"2026-11-14T19:53:14Z","assets":[]},
+            {"tag_name":"build-5849189-20261114-202123","published_at":"2026-11-14T20:21:24Z","assets":[]}
+        ]"#;
+        assert_eq!(newest_releases(list, "vermeer", "0.2.0", "7d47475").unwrap().version, "5849189");
     }
 
     #[test]
     fn the_release_page_names_its_newest_release_and_the_phone_s_zip() {
-        let page = r#"<script>{"payload":{"releasesIndexRoute":{"toc":[{"anchorId":"release-build-7d47475-20261114-195313"},{"anchorId":"release-0.1.4"}]}}}</script>"#;
-        assert_eq!(first_tag(page).as_deref(), Some("build-7d47475-20261114-195313"));
+        let page = r#"<section id="release-build-7d47475-20261114-195313"><relative-time datetime="2026-11-14T19:53:14Z"></relative-time></section><section id="release-build-5849189-20261114-202123"><relative-time datetime="2026-11-14T20:21:24Z"></relative-time></section>"#;
+        assert_eq!(newest_tag(page).as_deref(), Some("build-5849189-20261114-202123"));
         let assets = r#"<li><a href="/luoxunyong/skyward-by-Redmi-K70/releases/download/build-7d47475-20261114-195313/skyward-vermeer-v0.2.0-7d47475-20261114.zip"><span class="text-bold">skyward-vermeer-v0.2.0-7d47475-20261114.zip</span></a><span class="Truncate-text">sha256:44eb4518956aaeb97e8851cd04f954fc6b013a2b01bb6df5e6916bbf8e3a40c3</span><span>41.7 MB</span></li>"#;
         let build = page_build(assets, "vermeer").unwrap().expect("the phone's build");
         assert_eq!(build.name, "skyward-vermeer-v0.2.0-7d47475-20261114.zip");
