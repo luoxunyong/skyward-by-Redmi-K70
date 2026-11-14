@@ -128,6 +128,30 @@ impl Backlight {
     }
 }
 
+/// Keep the touch controllers' input devices from autosuspending while a
+/// lock waits behind the dark panel: the panel stays on with a little
+/// light, and the first touch has to wake the lock.
+fn set_touch_awake(on: bool) -> bool {
+    let Ok(entries) = fs::read_dir("/sys/class/input") else {
+        return false;
+    };
+    let mut found = false;
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let name = fs::read_to_string(path.join("name")).unwrap_or_default();
+        let name = name.trim().to_lowercase();
+        if !(name.contains("goodix") || name.contains("touch")) {
+            continue;
+        }
+        found = true;
+        let power = path.join("device/power");
+        let _ = fs::write(power.join("control"), if on { "on" } else { "auto" });
+        let _ = fs::write(power.join("wakeup"), if on { "enabled" } else { "disabled" });
+        let _ = kmsg(&format!("touch: {name} {}", if on { "kept awake" } else { "let rest" }));
+    }
+    found
+}
+
 /// How a panel's node in the device tree may give its normal maximum: the
 /// property holding it, and the one holding the whole range on the same
 /// scale. The 13 Ultra's panel gives both on a finer scale of its own that
@@ -1085,6 +1109,7 @@ pub fn run(cfg: &DeviceConfig, font: &Path, mono: &Path, request: bcb::Request, 
     let control = Control::open()?;
     let mut haptics = cfg.haptics.as_ref().map(Haptics::open).transpose()?;
     let mut backlight = Backlight::open()?;
+    let mut touch_awake = false;
     let first = match &request.work {
         Work::Fastboot => Screen::Fastboot,
         Work::PromptWipeData => Screen::CantStart,
@@ -1489,6 +1514,10 @@ pub fn run(cfg: &DeviceConfig, font: &Path, mono: &Path, request: bcb::Request, 
             let (running, link) = fastboot_status()?;
             app.set_fastboot(running, link);
             port_at = Instant::now();
+        }
+        let locked = app.state.lock.is_some();
+        if locked != touch_awake && set_touch_awake(locked) {
+            touch_awake = locked;
         }
         let panel = app.panel(now);
         let locked_off = app.locked_off();
