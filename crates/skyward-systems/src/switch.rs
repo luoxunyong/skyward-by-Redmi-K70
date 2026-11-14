@@ -75,6 +75,11 @@ fn other_init_boot(places: &Places, state: &State) -> Result<Vec<u8>> {
 fn finish(places: &Places, state: &mut State, init_boot: Option<Vec<u8>>) -> Result<()> {
     let switching = state.switching.clone().context("no switch to finish")?;
     let slot = Slot::from_suffix(&switching.slot).with_context(|| format!("the switch is to slot {:?}", switching.slot))?;
+    // The slot's vbmeta was made for the boot set it held, not for the one
+    // about to be written over it: turn its checks off, as an install does,
+    // so the bootloader starts what is written.
+    skyward_vab::disable_verified_boot_at(&places.by_name.join(format!("vbmeta{}", slot.suffix())))
+        .context("turn off verified boot on the slot")?;
     let store = state.store.clone().context("no store holds the boot sets")?;
     let init_boot = match (switching.to, init_boot) {
         (Who::Other, Some(made)) => Some(made),

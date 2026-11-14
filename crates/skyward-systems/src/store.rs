@@ -198,6 +198,11 @@ pub(crate) mod tests {
         for (name, len, fill) in [("boot_a", 8192, 0xa1), ("init_boot_a", 16384, 0xa2), ("boot_b", 8192, 0xb1), ("init_boot_b", 16384, 0xb2)] {
             std::fs::write(dir.join(name), vec![fill; len]).unwrap();
         }
+        for name in ["vbmeta_a", "vbmeta_b"] {
+            let mut bytes = vec![0u8; 4096];
+            bytes[..4].copy_from_slice(b"AVB0");
+            std::fs::write(dir.join(name), bytes).unwrap();
+        }
         (store, device)
     }
 

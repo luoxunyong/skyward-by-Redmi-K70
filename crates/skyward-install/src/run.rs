@@ -496,7 +496,7 @@ fn write_whole_payload<S>(ctx: &mut Context, mount: &Mount<S>, update: &Update) 
         &mut |done, total| ctx.send(Event::Progress(Stage::Writing { done, total })),
     )?;
     if ctx.options.avb {
-        if let Err(e) = disable_avb(slot) {
+        if let Err(e) = skyward_vab::disable_verified_boot(slot) {
             let _ = kmsg(&format!("install: verified boot not turned off: {e:#}"));
         }
     }
@@ -995,7 +995,7 @@ fn run_script(ctx: &mut Context, size: u64, served: impl Fn() -> u64) -> Result<
     let mounted = skyward_block::mount::mount_ids()?;
     let ran = run_binary(ctx, size, &served);
     if ctx.options.avb {
-        if let Err(e) = disable_avb(slot) {
+        if let Err(e) = skyward_vab::disable_verified_boot(slot) {
             let _ = kmsg(&format!("install: verified boot not turned off: {e:#}"));
         }
     }
@@ -1107,20 +1107,6 @@ fn bootctl_shim() -> Result<()> {
 /// flags fastboot sets for --disable-verity --disable-verification. The
 /// signature no longer matches afterwards, which an unlocked bootloader
 /// takes.
-fn disable_avb(slot: Slot) -> Result<()> {
-    let path = Path::new("/dev/block/by-name").join(format!("vbmeta{}", slot.suffix()));
-    let mut file = OpenOptions::new().read(true).write(true).open(&path).with_context(|| format!("open {}", path.display()))?;
-    let mut head = [0u8; 124];
-    file.read_exact(&mut head).with_context(|| format!("read {}", path.display()))?;
-    ensure!(&head[..4] == b"AVB0", "{} is not a vbmeta image", path.display());
-    let flags = u32::from_be_bytes(head[120..124].try_into().expect("four flag bytes")) | 3;
-    file.seek(SeekFrom::Start(120)).with_context(|| format!("seek {}", path.display()))?;
-    file.write_all(&flags.to_be_bytes()).with_context(|| format!("write {}", path.display()))?;
-    file.sync_all().with_context(|| format!("sync {}", path.display()))?;
-    let _ = kmsg(&format!("install: {} flags are now {flags}", path.display()));
-    Ok(())
-}
-
 /// Give scripts written for other recoveries the shell they start with.
 fn shell_at_sbin() -> Result<()> {
     for name in [SBIN_SHELL, SBIN_BASH] {

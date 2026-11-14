@@ -16,6 +16,30 @@ pub use partitions::{
 };
 pub use snapshots::Merge;
 
+/// Turn off verified boot's checks in the vbmeta of `slot`, as fastboot's
+/// `--disable-verity --disable-verification` does, so a boot set written in
+/// place of the one the slot's vbmeta was made for still starts.
+pub fn disable_verified_boot(slot: Slot) -> Result<()> {
+    disable_verified_boot_at(&Path::new(skyward_block::BY_NAME).join(format!("vbmeta{}", slot.suffix())))
+}
+
+/// [`disable_verified_boot`] for the vbmeta image at `path`.
+pub fn disable_verified_boot_at(path: &Path) -> Result<()> {
+    use std::io::{Read, Seek, SeekFrom, Write};
+    let mut file = fs::OpenOptions::new().read(true).write(true).open(path).with_context(|| format!("open {}", path.display()))?;
+    let mut head = [0u8; 124];
+    file.read_exact(&mut head).with_context(|| format!("read {}", path.display()))?;
+    if &head[..4] != b"AVB0" {
+        bail!("{} is not a vbmeta image", path.display());
+    }
+    let flags = u32::from_be_bytes(head[120..124].try_into().expect("four flag bytes")) | 3;
+    file.seek(SeekFrom::Start(120)).with_context(|| format!("seek {}", path.display()))?;
+    file.write_all(&flags.to_be_bytes()).with_context(|| format!("write {}", path.display()))?;
+    file.sync_all().with_context(|| format!("sync {}", path.display()))?;
+    let _ = skyward_sys::kmsg(&format!("install: {} flags are now {flags}", path.display()));
+    Ok(())
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Slot {
     A,
@@ -503,5 +527,21 @@ mod tests {
         assert_eq!(update(UpdateState::Unverified, Some(Slot::A)).holds_wipe(Slot::B), Some(Hold::Unconfirmed));
         assert_eq!(update(UpdateState::Merging, Some(Slot::A)).holds_wipe(Slot::B), Some(Hold::Merging));
         assert_eq!(update(UpdateState::MergeFailed, Some(Slot::A)).holds_wipe(Slot::B), Some(Hold::MergeFailed));
+    }
+}
+
+#[cfg(test)]
+mod verified_boot_tests {
+    use super::*;
+
+    #[test]
+    fn turning_off_verified_boot_sets_the_head_flags() {
+        let path = std::env::temp_dir().join(format!("skyward-vbmeta-{}", std::process::id()));
+        let mut bytes = vec![0u8; 4096];
+        bytes[..4].copy_from_slice(b"AVB0");
+        fs::write(&path, &bytes).unwrap();
+        disable_verified_boot_at(&path).unwrap();
+        assert_eq!(&fs::read(&path).unwrap()[120..124], &3u32.to_be_bytes());
+        let _ = fs::remove_file(&path);
     }
 }
