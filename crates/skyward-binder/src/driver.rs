@@ -34,11 +34,16 @@ const BINDER_VERSION: u32 = ioc(WRITE | READ, b'b', 9, 4);
 
 const BC_TRANSACTION: u32 = ioc(WRITE, b'c', 0, size_of::<TransactionData>());
 const BC_TRANSACTION_SG: u32 = ioc(WRITE, b'c', 17, size_of::<TransactionData>() + 8);
+const BC_REPLY: u32 = ioc(WRITE, b'c', 1, size_of::<TransactionData>());
 const BC_FREE_BUFFER: u32 = ioc(WRITE, b'c', 3, 8);
 const BC_ACQUIRE: u32 = ioc(WRITE, b'c', 5, 4);
 const BC_RELEASE: u32 = ioc(WRITE, b'c', 6, 4);
+const BC_INCREFS_DONE: u32 = ioc(WRITE, b'c', 8, 16);
+const BC_ACQUIRE_DONE: u32 = ioc(WRITE, b'c', 9, 16);
+const BC_ENTER_LOOPER: u32 = ioc(0, b'c', 12, 0);
 
 const BR_ERROR: u32 = ioc(READ, b'r', 0, 4);
+const BR_TRANSACTION: u32 = ioc(READ, b'r', 2, size_of::<TransactionData>());
 const BR_REPLY: u32 = ioc(READ, b'r', 3, size_of::<TransactionData>());
 const BR_DEAD_REPLY: u32 = ioc(0, b'r', 5, 0);
 const BR_TRANSACTION_COMPLETE: u32 = ioc(0, b'r', 6, 0);
@@ -55,6 +60,8 @@ const BR_FROZEN_REPLY: u32 = ioc(0, b'r', 18, 0);
 const TF_ACCEPT_FDS: u32 = 0x10;
 /// The reply carries a bare error number in place of a payload.
 const TF_STATUS_CODE: u32 = 0x08;
+/// The call expects no answer.
+const TF_ONE_WAY: u32 = 0x01;
 
 #[repr(C)]
 #[derive(Default)]
@@ -91,6 +98,8 @@ fn bytes_of<T>(v: &T) -> &[u8] {
 pub struct Binder {
     file: File,
     map: *mut libc::c_void,
+    /// Whether this thread has told the driver it takes calls.
+    looper: std::cell::Cell<bool>,
 }
 
 impl Binder {
@@ -126,7 +135,7 @@ impl Binder {
         if map == libc::MAP_FAILED {
             return Err(std::io::Error::last_os_error()).context("map the driver's replies");
         }
-        Ok(Binder { file, map })
+        Ok(Binder { file, map, looper: std::cell::Cell::new(false) })
     }
 
     /// The service directory, which every program reaches at handle 0. The
@@ -141,6 +150,30 @@ impl Binder {
 
     /// Call method `code` on `handle` and wait for what it answers.
     pub fn transact(&self, handle: u32, code: u32, data: &impl Payload) -> Result<Reply<'_>> {
+        self.send(handle, code, data, None)
+    }
+
+    /// Call method `code` on `handle`, taking any call the other side makes
+    /// back into this program along the way. A hardware service registers a
+    /// callback this way: it asks the callback what it serves before it
+    /// answers the call that handed it over.
+    pub fn transact_with(
+        &self,
+        handle: u32,
+        code: u32,
+        data: &impl Payload,
+        serve: &mut dyn FnMut(u32, &[u8]) -> Result<Vec<u8>>,
+    ) -> Result<Reply<'_>> {
+        self.send(handle, code, data, Some(serve))
+    }
+
+    fn send(
+        &self,
+        handle: u32,
+        code: u32,
+        data: &impl Payload,
+        serve: Option<&mut dyn FnMut(u32, &[u8]) -> Result<Vec<u8>>>,
+    ) -> Result<Reply<'_>> {
         let payload = data.values();
         let addresses = data.addresses();
         let td = TransactionData {
@@ -163,10 +196,16 @@ impl Binder {
         if !addresses.is_empty() {
             write.extend_from_slice(&data.pointed().to_ne_bytes());
         }
+        // A call with a callback is answered while the call is still out,
+        // so this thread has to be one the driver may hand calls to.
+        if serve.is_some() {
+            self.enter_looper()?;
+        }
         // The driver answers a call with a handful of short notices; what
         // the other side sent lands in the mapped room, not here.
         let mut read = [0u8; 256];
         let mut sent = false;
+        let mut serve = serve;
         loop {
             let mut bwr = WriteRead {
                 write_size: if sent { 0 } else { write.len() as u64 },
@@ -177,14 +216,43 @@ impl Binder {
             };
             unsafe { call(&self.file, BINDER_WRITE_READ, &mut bwr as *mut WriteRead as *mut libc::c_void) }.context("send a call")?;
             sent = true;
-            if let Some(reply) = self.answer(&read[..bwr.read_consumed as usize])? {
+            if let Some(reply) = self.answer(&read[..bwr.read_consumed as usize], &mut serve)? {
                 return Ok(reply);
             }
         }
     }
 
+    /// Wait for calls the other side makes into this program, until `done`
+    /// says the one that matters has come.
+    pub fn serve_until(
+        &self,
+        done: &std::sync::atomic::AtomicBool,
+        serve: &mut dyn FnMut(u32, &[u8]) -> Result<Vec<u8>>,
+    ) -> Result<()> {
+        use std::sync::atomic::Ordering;
+        self.enter_looper()?;
+        let mut read = [0u8; 256];
+        let mut serve = Some(serve);
+        while !done.load(Ordering::Acquire) {
+            let mut bwr = WriteRead {
+                read_size: read.len() as u64,
+                read_buffer: read.as_mut_ptr() as u64,
+                ..WriteRead::default()
+            };
+            unsafe { call(&self.file, BINDER_WRITE_READ, &mut bwr as *mut WriteRead as *mut libc::c_void) }.context("take a call")?;
+            if let Some(reply) = self.answer(&read[..bwr.read_consumed as usize], &mut serve)? {
+                drop(reply);
+            }
+        }
+        Ok(())
+    }
+
     /// What the driver said back, and the reply among it if it has come.
-    fn answer(&self, mut said: &[u8]) -> Result<Option<Reply<'_>>> {
+    fn answer(
+        &self,
+        mut said: &[u8],
+        serve: &mut Option<&mut dyn FnMut(u32, &[u8]) -> Result<Vec<u8>>>,
+    ) -> Result<Option<Reply<'_>>> {
         while said.len() >= 4 {
             let note = u32::from_ne_bytes(said[..4].try_into().expect("four bytes"));
             said = &said[4..];
@@ -195,8 +263,41 @@ impl Binder {
             };
             match note {
                 BR_NOOP | BR_TRANSACTION_COMPLETE | BR_SPAWN_LOOPER => {}
-                BR_INCREFS | BR_ACQUIRE | BR_RELEASE | BR_DECREFS => {
+                BR_INCREFS | BR_ACQUIRE => {
+                    let raw = skip(16);
+                    let ptr = u64::from_ne_bytes(raw[0..8].try_into().expect("eight bytes"));
+                    let cookie = u64::from_ne_bytes(raw[8..16].try_into().expect("eight bytes"));
+                    let done = match note {
+                        BR_INCREFS => BC_INCREFS_DONE,
+                        _ => BC_ACQUIRE_DONE,
+                    };
+                    let mut payload = Vec::with_capacity(16);
+                    payload.extend_from_slice(&ptr.to_ne_bytes());
+                    payload.extend_from_slice(&cookie.to_ne_bytes());
+                    self.tell(done, &payload)?;
+                }
+                BR_RELEASE | BR_DECREFS => {
                     skip(16);
+                }
+                BR_TRANSACTION => {
+                    let raw = skip(size_of::<TransactionData>());
+                    let td: TransactionData = unsafe { std::ptr::read_unaligned(raw.as_ptr().cast()) };
+                    let data = unsafe {
+                        match td.data_size {
+                            0 => &[][..],
+                            n => std::slice::from_raw_parts(td.buffer as *const u8, n as usize),
+                        }
+                    };
+                    let answer = match serve {
+                        Some(handle) => (**handle)(td.code, data)?,
+                        None => bail!("the other side called back, and this call takes no answer"),
+                    };
+                    if td.flags & TF_ONE_WAY == 0 {
+                        self.reply(&answer)?;
+                    }
+                    if td.buffer != 0 {
+                        self.free(td.buffer)?;
+                    }
                 }
                 BR_REPLY => {
                     let raw = skip(size_of::<TransactionData>());
@@ -223,10 +324,38 @@ impl Binder {
         Ok(None)
     }
 
+    /// Answer the call the driver just brought in.
+    fn reply(&self, payload: &[u8]) -> Result<()> {
+        let td = TransactionData {
+            data_size: payload.len() as u64,
+            buffer: payload.as_ptr() as u64,
+            ..TransactionData::default()
+        };
+        let mut write = BC_REPLY.to_ne_bytes().to_vec();
+        write.extend_from_slice(bytes_of(&td));
+        self.write(&write)
+    }
+
+    /// Tell the driver this thread takes calls, once.
+    fn enter_looper(&self) -> Result<()> {
+        if self.looper.get() {
+            return Ok(());
+        }
+        let mut threads: u32 = 1;
+        unsafe { call(&self.file, BINDER_SET_MAX_THREADS, &mut threads as *mut u32 as *mut libc::c_void) }.context("take one call at a time")?;
+        self.tell(BC_ENTER_LOOPER, &[])?;
+        self.looper.set(true);
+        Ok(())
+    }
+
     /// Tell the driver something that needs no answer.
     fn tell(&self, note: u32, payload: &[u8]) -> Result<()> {
         let mut write = note.to_ne_bytes().to_vec();
         write.extend_from_slice(payload);
+        self.write(&write)
+    }
+
+    fn write(&self, write: &[u8]) -> Result<()> {
         let mut bwr = WriteRead {
             write_size: write.len() as u64,
             write_buffer: write.as_ptr() as u64,
@@ -279,6 +408,15 @@ impl<'a> Handle<'a> {
     pub fn transact(&self, code: u32, data: &impl Payload) -> Result<Reply<'a>> {
         self.binder.transact(self.handle, code, data)
     }
+
+    pub fn transact_with(
+        &self,
+        code: u32,
+        data: &impl Payload,
+        serve: &mut dyn FnMut(u32, &[u8]) -> Result<Vec<u8>>,
+    ) -> Result<Reply<'a>> {
+        self.binder.transact_with(self.handle, code, data, serve)
+    }
 }
 
 impl Drop for Handle<'_> {
@@ -329,7 +467,12 @@ mod tests {
         assert_eq!(BINDER_SET_MAX_THREADS, 0x4004_6205);
         assert_eq!(BC_TRANSACTION, 0x4040_6300);
         assert_eq!(BC_TRANSACTION_SG, 0x4048_6311);
+        assert_eq!(BC_REPLY, 0x4040_6301);
         assert_eq!(BC_FREE_BUFFER, 0x4008_6303);
+        assert_eq!(BC_INCREFS_DONE, 0x4010_6308);
+        assert_eq!(BC_ACQUIRE_DONE, 0x4010_6309);
+        assert_eq!(BC_ENTER_LOOPER, 0x0000_630c);
+        assert_eq!(BR_TRANSACTION, 0x8040_7202);
         assert_eq!(BR_REPLY, 0x8040_7203);
         assert_eq!(BR_NOOP, 0x0000_720c);
         assert_eq!(BR_DEAD_REPLY, 0x0000_7205);

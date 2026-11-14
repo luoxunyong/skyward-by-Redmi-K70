@@ -15,6 +15,9 @@ const ADDRESS: u32 = u32::from_be_bytes([b'p', b't', b'*', 0x85]);
 /// An object in the sending process, as the driver carries it.
 const OBJECT: u32 = u32::from_be_bytes([b's', b'h', b'*', 0x85]);
 
+/// A binder this program holds itself, handed to the far side.
+const BINDER: u32 = u32::from_be_bytes([b's', b'b', b'*', 0x85]);
+
 /// The bytes this address points at sit inside what another address of the
 /// same call points at.
 const INSIDE_ANOTHER: u32 = 1;
@@ -80,6 +83,17 @@ impl Message {
         self.framed(at, value.len(), value.len() + 1);
     }
 
+    /// A strong binder this program holds, handed to the far side. `node`
+    /// names the object here and `cookie` is what the driver carries back
+    /// with a call to it.
+    pub fn object(&mut self, node: u64, cookie: u64) {
+        self.addresses.push(self.data.len() as u64);
+        self.data.extend_from_slice(&BINDER.to_le_bytes());
+        self.data.extend_from_slice(&0x7fu32.to_le_bytes());
+        self.data.extend_from_slice(&node.to_le_bytes());
+        self.data.extend_from_slice(&cookie.to_le_bytes());
+    }
+
     /// Hold on to bytes the driver will read, and say where they are.
     fn keep(&mut self, bytes: Vec<u8>) -> u64 {
         let bytes = bytes.into_boxed_slice();
@@ -133,6 +147,75 @@ impl Payload for Message {
     }
 }
 
+/// A reply being written the way a hardware service writes one.
+#[derive(Default)]
+pub struct Out {
+    data: Vec<u8>,
+}
+
+impl Out {
+    pub fn new() -> Out {
+        Out::default()
+    }
+
+    /// The "no error" word every call that answers nothing carries.
+    pub fn status() -> Out {
+        let mut out = Out::default();
+        out.u32(0);
+        out
+    }
+
+    pub fn u32(&mut self, v: u32) {
+        self.data.extend_from_slice(&v.to_le_bytes());
+    }
+
+    pub fn u64(&mut self, v: u64) {
+        self.data.extend_from_slice(&v.to_le_bytes());
+    }
+
+    /// Text as the older layout writes it: its length, its bytes, a
+    /// terminator, and padding to a whole word of four.
+    pub fn text(&mut self, value: &str) {
+        self.u32(value.len() as u32);
+        self.data.extend_from_slice(value.as_bytes());
+        self.data.push(0);
+        self.pad();
+    }
+
+    /// A counted list of texts.
+    pub fn strings(&mut self, values: &[&str]) {
+        self.u32(values.len() as u32);
+        for value in values {
+            self.text(value);
+        }
+    }
+
+    /// A run of bytes, counted and padded.
+    pub fn bytes(&mut self, value: &[u8]) {
+        self.u32(value.len() as u32);
+        self.data.extend_from_slice(value);
+        self.pad();
+    }
+
+    /// A counted list of interface hashes.
+    pub fn hashes(&mut self, values: &[[u8; 32]]) {
+        self.u32(values.len() as u32);
+        for value in values {
+            self.data.extend_from_slice(value);
+        }
+    }
+
+    fn pad(&mut self) {
+        while !self.data.len().is_multiple_of(4) {
+            self.data.push(0);
+        }
+    }
+
+    pub fn bytes_written(&self) -> &[u8] {
+        &self.data
+    }
+}
+
 /// Reads back what a hardware service answered.
 pub struct Answer<'a> {
     data: &'a [u8],
@@ -151,7 +234,7 @@ impl<'a> Answer<'a> {
         if code == 0 {
             return Ok(());
         }
-        match self.text() {
+        match self.string() {
             Ok(why) if !why.is_empty() => bail!("the service refused the call: {why}"),
             _ => bail!("the service refused the call with its code {code}"),
         }
@@ -183,18 +266,48 @@ impl<'a> Answer<'a> {
         Ok(unsafe { std::slice::from_raw_parts(at as *const u8, length as usize) })
     }
 
-    /// Text the far side wrote as its own value rather than as a frame.
-    fn text(&mut self) -> Result<String> {
+    pub fn u32(&mut self) -> Result<u32> {
+        Ok(u32::from_le_bytes(self.take(4)?.try_into().expect("four bytes")))
+    }
+
+    pub fn u64(&mut self) -> Result<u64> {
+        Ok(u64::from_le_bytes(self.take(8)?.try_into().expect("eight bytes")))
+    }
+
+    /// Text as the older layout writes it: its length, its bytes, a
+    /// terminator, and padding to a whole word of four.
+    pub fn string(&mut self) -> Result<String> {
         let units = self.i32()?;
         if units < 0 {
             bail!("text of length {units} was read where some was expected");
         }
-        let raw = self.take((units as usize + 1) * 2)?;
+        let raw = self.take(units as usize + 1)?;
         while !self.at.is_multiple_of(4) && self.at < self.data.len() {
             self.at += 1;
         }
-        let utf16: Vec<u16> = raw[..units as usize * 2].as_chunks::<2>().0.iter().map(|c| u16::from_le_bytes(*c)).collect();
-        Ok(String::from_utf16_lossy(&utf16))
+        Ok(String::from_utf8_lossy(&raw[..units as usize]).into_owned())
+    }
+
+    /// A run of bytes, counted and padded.
+    pub fn bytes(&mut self) -> Result<&'a [u8]> {
+        let units = self.i32()?;
+        if units < 0 {
+            bail!("a run of {units} bytes was read where some were expected");
+        }
+        let raw = self.take(units as usize)?;
+        while !self.at.is_multiple_of(4) && self.at < self.data.len() {
+            self.at += 1;
+        }
+        Ok(raw)
+    }
+
+    /// A counted list of texts.
+    pub fn strings(&mut self) -> Result<Vec<String>> {
+        let count = self.i32()?;
+        if count < 0 {
+            bail!("{count} texts were read where some were expected");
+        }
+        (0..count).map(|_| self.string()).collect()
     }
 
     /// The handle of an object in the answering process.
