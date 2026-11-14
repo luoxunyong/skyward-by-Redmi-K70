@@ -38,6 +38,8 @@ mod ui;
 #[cfg(target_os = "android")]
 mod updates;
 #[cfg(target_os = "android")]
+mod vintf;
+#[cfg(target_os = "android")]
 mod wipe;
 #[cfg(target_os = "android")]
 mod wlan;
@@ -510,6 +512,8 @@ fn bring_up(cfg: &DeviceConfig, slot: skyward_vab::Slot) -> Result<()> {
         let at = skyward_block::fstab::mount(name)?;
         skyward_sys::kmsg(&format!("{name} is mounted on {}", at.display()))?;
     }
+    vintf::prepare().context("make the phone's hardware services reachable")?;
+    skyward_sys::kmsg("the phone's hardware service manifest is ready")?;
     for path in load_modules(cfg, &cfg.modules.load)? {
         skyward_sys::kmsg(&format!("loaded {}", path.display()))?;
     }

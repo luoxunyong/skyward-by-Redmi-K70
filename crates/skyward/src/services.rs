@@ -41,10 +41,13 @@ const CAPABILITY_VERSION_3: u32 = 0x2008_0522;
 pub fn start(services: &[Service], libraries: Option<&Path>) -> Result<()> {
     let known = ueventd::accounts(&ueventd::PASSWD_FILES.iter().chain(&ueventd::GROUP_FILES).copied().collect::<Vec<_>>());
     for s in services {
-        if !Path::new(&s.path).is_file() {
-            bail!("{} is missing; is its partition mounted?", s.path);
-        }
         let mut s = s.clone();
+        if !Path::new(&s.path).is_file() {
+            match s.paths.iter().find(|p| Path::new(p).is_file()) {
+                Some(found) => s.path = found.clone(),
+                None => bail!("{} is missing; is its partition mounted?", s.path),
+            }
+        }
         if let Some(dir) = libraries {
             s.libraries.push(dir.to_string_lossy().into_owned());
         }

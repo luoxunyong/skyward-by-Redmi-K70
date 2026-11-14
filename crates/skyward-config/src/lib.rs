@@ -350,6 +350,10 @@ pub struct Partitions {
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 pub struct Service {
     pub path: String,
+    /// Other places the program may be, where this phone's build keeps it
+    /// somewhere else. The first that is there is run.
+    #[serde(default)]
+    pub paths: Vec<String>,
     /// What the program is given after its own path, as init gives a
     /// service the words after its path.
     #[serde(default)]
