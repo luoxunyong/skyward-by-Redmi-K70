@@ -2987,6 +2987,11 @@ pub fn skyward_update(cx: &Ctx) -> Frame {
             "The new version goes into the recovery partition of the slot that starts next, and into the other slot's where it holds Skyward.",
         ]),
         l.pick(["更新完成后，重启到恢复模式即可使用新版本。", "更新完成後，重新啟動到復原模式即可使用新版本。", "Once updated, reboot to recovery to use the new version."]),
+        l.pick([
+            "下载前会自动测试 GitHub 镜像源的延迟，选择最快的源。",
+            "下載前會自動測試 GitHub 鏡像源的延遲，選擇最快的來源。",
+            "GitHub mirrors are timed before the download, and the fastest is used.",
+        ]),
     ];
     let y = widgets::notes(&mut c, t, f, y + t.m.card_gap, l.pick(NOTES), &points);
     Frame::new(t, fit(c, t, y), out, l.pick(SKYWARD_UPDATE), top)
@@ -3044,7 +3049,10 @@ fn skyward_online(c: &mut Canvas, cx: &Ctx, y: f32, out: &mut Vec<Hit>) -> f32 {
                     (l.pick(["正在写入 recovery 分区", "正在寫入 recovery 分割區", "Writing the recovery partitions"]), tr!(l, "已完成 {p}%", "已完成 {p}%", "{p}% done"), Some(part))
                 }
             };
-            let y = widgets::progress_card(c, t, f, y + gap, heading, &detail, share);
+            let mut y = widgets::progress_card(c, t, f, y + gap, heading, &detail, share);
+            if let Some(source) = &job.source {
+                y = widgets::footnote(c, t, f, y, &tr!(l, "下载源：{source}", "下載來源：{source}", "Downloading from {source}"));
+            }
             if matches!(job.stage, Some(SkywardStage::Write { .. })) {
                 return widgets::footnote(c, t, f, y, l.pick(["写入完成前，请不要关机。", "寫入完成前，請不要關機。", "Don't power off until it's written."]));
             }

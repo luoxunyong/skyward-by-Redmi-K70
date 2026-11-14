@@ -2028,7 +2028,7 @@ pub fn run(cfg: &DeviceConfig, font: &Path, mono: &Path, request: bcb::Request, 
                         app.download_ended(end, have(&app, &release), now);
                         fetched = true;
                     }
-                    updates::Event::Checked(_) | updates::Event::SkywardChecked(_) | updates::Event::Writing { .. } => {
+                    updates::Event::Checked(_) | updates::Event::SkywardChecked(_) | updates::Event::SkywardSource(_) | updates::Event::Writing { .. } => {
                         unreachable!("a download asks nothing of its own, and writes nothing")
                     }
                 }
@@ -2054,6 +2054,7 @@ pub fn run(cfg: &DeviceConfig, font: &Path, mono: &Path, request: bcb::Request, 
             for ev in u.events() {
                 match ev {
                     updates::Event::Progress(progress, rate) => app.skyward_progress(SkywardStage::Download(progress), rate),
+                    updates::Event::SkywardSource(source) => app.skyward_source(source),
                     updates::Event::Writing { done, total } => app.skyward_progress(SkywardStage::Write { done, total }, 0),
                     updates::Event::Ended(end) => {
                         let end = match end {

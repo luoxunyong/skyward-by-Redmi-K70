@@ -201,6 +201,9 @@ pub enum SkywardCheck {
 pub struct SkywardJob {
     /// None until the download has begun.
     pub stage: Option<SkywardStage>,
+    /// The source the build is downloaded from, named with how long it
+    /// took to answer; none until the sources have been timed.
+    pub source: Option<String>,
     /// Bytes a second, while it downloads.
     pub rate: u64,
     pub outcome: Option<SkywardEnd>,
@@ -4041,6 +4044,17 @@ impl App {
         }
     }
 
+    /// The source the update's build is coming from, and how long it took
+    /// to answer.
+    pub fn skyward_source(&mut self, source: String) {
+        if let Some(job) = self.state.skyward_job.as_mut() {
+            job.source = Some(source);
+        }
+        if self.screen() == Screen::SkywardUpdate {
+            self.refresh();
+        }
+    }
+
     /// Updating Skyward has ended: its page says how, lit for the user to
     /// read.
     pub fn skyward_ended(&mut self, end: SkywardEnd, now: u64) {
@@ -6094,7 +6108,7 @@ impl App {
                     return Vec::new();
                 }
                 if !self.state.updating_skyward() {
-                    self.state.skyward_job = Some(SkywardJob { stage: None, rate: 0, outcome: None, stopping: false });
+                    self.state.skyward_job = Some(SkywardJob { stage: None, source: None, rate: 0, outcome: None, stopping: false });
                     self.refresh();
                     return vec![Effect::UpdateSkyward(build)];
                 }

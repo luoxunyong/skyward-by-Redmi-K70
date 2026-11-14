@@ -54,6 +54,9 @@ pub enum Event {
     Checked(Result<Option<Release>, Unanswered>),
     /// What GitHub answered of Skyward's newest release.
     SkywardChecked(Result<Newest, Unanswered>),
+    /// The source the build is downloaded from, named with how long it took
+    /// to answer.
+    SkywardSource(String),
     /// How far the download has come, and how fast it goes, in bytes a
     /// second.
     Progress(Progress, u64),
@@ -181,7 +184,9 @@ impl Worker {
                             }
                         };
                         let sum = Sum::Sha256(build.sha256.clone());
-                        let end = match fetch(&servers, build.sources(located), &sum, &build.name, &path, &stopping, &using, &tell, &mut refused) {
+                        let (sources, source) = fastest(&servers, build.sources(located), &build.link);
+                        tell(Event::SkywardSource(source));
+                        let end = match fetch(&servers, sources, &sum, &build.name, &path, &stopping, &using, &tell, &mut refused) {
                             // Stopping asked for as the last of it came is
                             // stopping still: nothing is written.
                             End::Downloaded if stopping.load(Ordering::Relaxed) => End::Stopped,
@@ -349,6 +354,40 @@ fn fetch(
             thread::sleep(Duration::from_millis(100));
         }
     }
+}
+
+/// Ask every source at once how long it takes to answer, put the fastest
+/// first, and name it with its time for the page. A source that does not
+/// answer goes last, where the download still tries it before giving up.
+fn fastest(servers: &Servers, sources: Vec<String>, link: &str) -> (Vec<String>, String) {
+    let probed = std::thread::scope(|scope| {
+        let handles: Vec<_> = sources
+            .into_iter()
+            .map(|url| {
+                let servers = servers.clone();
+                scope.spawn(move || {
+                    let agent = http::probe_agent(servers);
+                    let ms = github::probe(&agent, &url);
+                    (url, ms)
+                })
+            })
+            .collect();
+        handles.into_iter().filter_map(|h| h.join().ok()).collect::<Vec<_>>()
+    });
+    let mut probed = probed;
+    probed.sort_by_key(|(_, ms)| ms.unwrap_or(Duration::MAX));
+    for (url, ms) in &probed {
+        let said = match ms {
+            Some(ms) => format!("{} ms", ms.as_millis()),
+            None => "nothing".to_string(),
+        };
+        let _ = skyward_sys::kmsg(&format!("GitHub source {} answered {said}", github::source_name(url, link)));
+    }
+    let source = match probed.first() {
+        Some((url, Some(ms))) => format!("{} · {} ms", github::source_name(url, link), ms.as_millis()),
+        _ => "GitHub".to_string(),
+    };
+    (probed.into_iter().map(|(url, _)| url).collect(), source)
 }
 
 /// Write the image in the zip at `path`, once it is Skyward for the phone
