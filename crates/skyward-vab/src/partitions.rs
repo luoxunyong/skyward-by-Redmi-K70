@@ -457,7 +457,8 @@ pub fn release_whole(slot: Slot) -> Result<()> {
     let mut points = Vec::new();
     for p in slot_partitions(&md, slot) {
         let point = mount_point(base(p, slot));
-        ended |= end_running_from(&point);
+        let dev = skyward_block::dm::status(&p.name).ok().flatten();
+        ended |= end_running_from(&point, dev);
         points.push(point);
     }
     if ended {
@@ -465,10 +466,7 @@ pub fn release_whole(slot: Slot) -> Result<()> {
         // them; the devices they held are free once that is done.
         std::thread::sleep(std::time::Duration::from_millis(300));
     }
-    let taken = release_own_mappings(&points);
-    if taken > 0 {
-        let _ = skyward_sys::kmsg(&format!("install: {taken} mappings this recovery held of the slot let go"));
-    }
+    release_own_mappings(&points);
     // Every mount on those partitions comes off detached, so a program that
     // the kernel has not yet let go of does not keep the mount, nor the
     // device-mapper device under it, standing.
@@ -551,12 +549,14 @@ fn unmap_for_good(name: &str, point: &Path) -> Result<()> {
 /// unless it is dropped here.
 fn release_own_mappings(points: &[PathBuf]) -> usize {
     let Ok(maps) = fs::read_to_string("/proc/self/maps") else { return 0 };
+    let total = maps.lines().count();
     let mut taken = 0;
     for (start, end) in mappings_under(&maps, points) {
         if unsafe { libc::munmap(start as *mut libc::c_void, (end - start) as usize) } == 0 {
             taken += 1;
         }
     }
+    let _ = skyward_sys::kmsg(&format!("install: {taken} of {total} mappings of this recovery are on the slot"));
     taken
 }
 
@@ -584,7 +584,7 @@ fn mappings_under(maps: &str, points: &[PathBuf]) -> Vec<(u64, u64)> {
 /// End every program whose executable, working directory, open files or
 /// mappings lie under `point`, telling whether any was found. The programs
 /// ended are let go by the kernel as init reaps them.
-fn end_running_from(point: &Path) -> bool {
+fn end_running_from(point: &Path, dev: Option<(u32, u32)>) -> bool {
     let Ok(entries) = std::fs::read_dir("/proc") else { return false };
     let mut ended = false;
     for entry in entries.flatten() {
@@ -596,7 +596,7 @@ fn end_running_from(point: &Path) -> bool {
             continue;
         }
         let root = entry.path();
-        if !runs_from(&root, point) {
+        if !runs_from(&root, point, dev) {
             continue;
         }
         ended = true;
@@ -674,7 +674,7 @@ const LOOP_CLR_FD: libc::c_ulong = 0x4C01;
 /// library or a file of it mapped. A process holds a partition by any of
 /// these, and while one of them stands the partition cannot be unmounted
 /// nor its device-mapper device taken away.
-fn runs_from(root: &Path, point: &Path) -> bool {
+fn runs_from(root: &Path, point: &Path, dev: Option<(u32, u32)>) -> bool {
     let under = |p: &Path| p.starts_with(point);
     if std::fs::read_link(root.join("exe")).is_ok_and(|p| under(&p)) || std::fs::read_link(root.join("cwd")).is_ok_and(|p| under(&p)) {
         return true;
@@ -688,12 +688,38 @@ fn runs_from(root: &Path, point: &Path) -> bool {
         }
     }
     // What it has mapped: a library of the partition is enough to keep it.
-    std::fs::read_to_string(root.join("maps")).is_ok_and(|maps| maps.lines().any(|line| line.split_whitespace().nth(5).is_some_and(|p| under(Path::new(p)))))
+    // The device the mapped file is on says which partition it is when the
+    // path it was reached by does not: a service this recovery starts has
+    // the partition as its root, so its paths read /bin/qseecomd while the
+    // file behind them is the partition's own.
+    let Ok(maps) = std::fs::read_to_string(root.join("maps")) else { return false };
+    if maps.lines().any(|line| line.split_whitespace().nth(5).is_some_and(|p| under(Path::new(p)))) {
+        return true;
+    }
+    dev.is_some_and(|dev| maps_on_device(&maps, dev))
+}
+
+/// Whether an `/proc/pid/maps` text maps a file on `dev`, the device the
+/// kernel names there, such as `fe:05`.
+fn maps_on_device(maps: &str, dev: (u32, u32)) -> bool {
+    let want = format!("{:02x}:{:02x}", dev.0, dev.1);
+    maps.lines().any(|line| line.split_whitespace().nth(3) == Some(want.as_str()))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_mapping_on_a_partitions_device_is_told_by_its_device() {
+        let maps = "\
+5e412fa000-5e412fe000 r--p 00000000 fe:05 3003502 /bin/qseecomd
+5b747030000-5b7470c000 r--p 00000000 fe:04 8395264 /bin/hwservicemanager
+7c91e99000-7c92af2000 ---p 00000000 00:00 0";
+        assert!(maps_on_device(maps, (254, 5)), "vendor_a");
+        assert!(maps_on_device(maps, (254, 4)), "system_ext_a");
+        assert!(!maps_on_device(maps, (254, 2)), "system_a");
+    }
 
     #[test]
     fn mappings_of_the_slot_are_told_from_the_others() {

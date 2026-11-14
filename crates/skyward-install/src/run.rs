@@ -966,12 +966,20 @@ fn run_script(ctx: &mut Context, size: u64, served: impl Fn() -> u64) -> Result<
     // its device-mapper device busy, and a package that removes the groups
     // cannot unmap it: update_dynamic_partitions then fails with
     // "Device or resource busy".
-    detach_once(ctx)?;
+    //
+    // A package that lays super out again is given the slot without the
+    // pages pinned for the phone's services: the pinning maps them from
+    // the partitions themselves, and a mapping of this recovery's own
+    // keeps the mount, and the device-mapper device under it, standing.
+    // The services running from the slot are ended by release_whole
+    // instead, and their mounts and devices go with them.
     if remakes_super {
         if let Err(e) = skyward_vab::release_whole(slot) {
             let _ = kmsg(&format!("install: the slot's partitions could not all be let go: {e:#}"));
         }
         let _ = kmsg("install: the package lays super out again, so nothing of the slot is held");
+    } else {
+        detach_once(ctx)?;
     }
     let mapped = match (skyward_vab::snapshot_state()?, remakes_super) {
         (SnapshotState::None, false) => skyward_vab::map_slot(slot)?,
