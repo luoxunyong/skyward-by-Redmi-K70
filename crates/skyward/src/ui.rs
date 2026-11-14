@@ -56,9 +56,9 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 /// program behind the new one has to start and get ready first.
 const USB_TIMEOUT: Duration = Duration::from_secs(5);
 
-/// How long the page shows that the work the system asked for is done
-/// before the phone starts the system or powers off.
-const LEAVE_AFTER_MS: u64 = 1500;
+/// The phone starts the system or powers off as soon as the work the
+/// system asked for is done. No fixed wait is kept here.
+const LEAVE_AFTER_MS: u64 = 0;
 
 /// How long after the screen starts a touch panel may still come up; with
 /// none by then, the pages are worked with the keys, their light shown.
@@ -1345,9 +1345,8 @@ pub fn run(cfg: &DeviceConfig, font: &Path, mono: &Path, request: bcb::Request, 
             app.report(&format!("{e:#}"), monotonic_ms());
         }
     }
-    // Once the work the system asked for is done, the page shows it for a
-    // moment; then the phone starts the system, or powers off where the
-    // request says to.
+    // Once the work the system asked for is done, the phone starts the
+    // system, or powers off where the request says to, at once.
     let leave = if request.shutdown_after { Target::PowerOff } else { Target::System };
     let mut leave_at: Option<u64> = None;
     // The terminal page's shell, from when the page first asks for one.
