@@ -3426,9 +3426,9 @@ impl App {
     /// is told to go off.
     pub fn panel(&self, now: u64) -> Option<f32> {
         if self.locked_dark {
-            // Low enough to look dark, high enough that the touch driver
-            // following the panel does not take the light for off.
-            return Some(0.004);
+            // The panel stays lit so the touch controller following it
+            // stays awake; the light is as low as the backlight goes.
+            return Some(0.0);
         }
         if !self.display_on {
             return self.darkening.filter(|_| self.curtain.level(now) > 0.0);
@@ -12298,7 +12298,7 @@ mod tests {
         assert_eq!(app.screen(), Screen::Home, "the lock waits for the screen to sleep");
         press(&mut app, Key::Power, 1000);
         assert_eq!(app.screen(), Screen::Lock);
-        assert_eq!(app.panel(1000), Some(0.004), "the light is low, not off");
+        assert_eq!(app.panel(1000), Some(0.0), "the light is at its lowest, not off");
         press(&mut app, Key::Power, 2000);
         assert!(app.display_on());
         assert_ne!(app.panel(2000), Some(0.0), "the light is back");
@@ -12363,7 +12363,7 @@ mod tests {
         let salt = "0e0f";
         app.state.lock = Some(Lock { kind: "pin".into(), salt: salt.into(), hash: lock_hash("pin", salt, "1234") });
         app.sleep(0);
-        assert_eq!(app.panel(0), Some(0.004), "the light is low, not off");
+        assert_eq!(app.panel(0), Some(0.0), "the light is at its lowest, not off");
         // The touch that wakes lights the panel.
         app.touch(Touch::Down(100.0, 100.0), &f, 100);
         assert!(app.display_on());
