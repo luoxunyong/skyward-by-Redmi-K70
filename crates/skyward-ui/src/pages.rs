@@ -3929,7 +3929,19 @@ pub fn systems(cx: &Ctx) -> Frame {
     let systems = match &s.systems {
         Some(Ok(systems)) => systems,
         Some(Err(why)) => {
-            let list = widgets::list(&mut c, t, f, top, &[Row::new(l.pick(["无法读取双系统", "無法讀取雙系統", "Couldn't read the systems"])).trail(Trail::None)]);
+            // The systems as a whole could not be read, but the installed
+            // system's own name and version are still known from the same
+            // properties the About page reads.
+            let name = match i.os_name {
+                Some(OsName::Miui) => "MIUI".to_string(),
+                Some(OsName::ColorOs) => "ColorOS".to_string(),
+                Some(OsName::Flyme) => "FlymeOS".to_string(),
+                Some(OsName::HyperOs) => "HyperOS".to_string(),
+                None => l.pick(["系统", "系統", "System"]).to_string(),
+            };
+            let detail = i.os_version.as_deref().unwrap_or_default();
+            let main = SystemCard { role: l.pick(MAIN_SYSTEM), name: &name, detail, mark: SystemMark::Check(true) };
+            let list = widgets::system_cards(&mut c, t, f, top, &[main]);
             let y = widgets::footnote(&mut c, t, f, list.bottom, why);
             return Frame::new(t, fit(c, t, y), out, title, top);
         }
@@ -3938,10 +3950,20 @@ pub fn systems(cx: &Ctx) -> Frame {
     let starts = starting(systems);
     let chosen = s.system_pick.unwrap_or(starts);
     let second_role = l.pick(SECOND_SYSTEM);
+    // The installed system names itself through the same properties the
+    // About page reads: a port tells its maker's name and version there,
+    // not the Android release the boot build happens to carry.
+    let main_name = match i.os_name {
+        Some(OsName::Miui) => "MIUI".to_string(),
+        Some(OsName::ColorOs) => "ColorOS".to_string(),
+        Some(OsName::Flyme) => "FlymeOS".to_string(),
+        Some(OsName::HyperOs) | None => systems.installed.name.clone(),
+    };
+    let main_detail = i.os_version.as_deref().or(systems.installed.version.as_deref()).unwrap_or_default();
     let main = SystemCard {
         role: l.pick(MAIN_SYSTEM),
-        name: &systems.installed.name,
-        detail: systems.installed.version.as_deref().unwrap_or_default(),
+        name: &main_name,
+        detail: main_detail,
         mark: SystemMark::Check(chosen == Who::Installed),
     };
     let second = match &systems.other {

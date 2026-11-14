@@ -3585,14 +3585,15 @@ impl App {
     /// Take the settings `kept` from the starts before, and speak the
     /// language chosen then, or else the one the system `named`, or else
     /// the one the pages last spoke.
-    pub fn take_settings(&mut self, kept: Option<&Settings>, named: Option<Lang>) {
+    pub fn take_settings(&mut self, kept: Option<&Settings>, _named: Option<Lang>) {
         if let Some(kept) = kept {
             kept.apply(&mut self.state);
         }
         if !self.state.language_chosen {
-            if let Some(lang) = named.or(kept.and_then(Settings::spoken)) {
-                self.state.lang = lang;
-            }
+            // The recovery speaks Simplified Chinese by default, whatever
+            // the installed system names, until a language is chosen on
+            // the language page.
+            self.state.lang = Lang::Hans;
         }
         self.refresh();
     }
@@ -9047,7 +9048,7 @@ mod tests {
         let (f, i) = (fonts(), info());
         let mut app = opened(Screen::Settings, &f, &i);
         app.take_settings(None, Some(Lang::Hant));
-        assert_eq!((app.state.lang, app.settings().language), (Lang::Hant, None), "the system's, until one is chosen");
+        assert_eq!((app.state.lang, app.settings().language), (Lang::Hans, None), "the simplified default, until one is chosen");
         tap(&mut app, &f, &i, Action::Open(Screen::Language));
         tap(&mut app, &f, &i, Action::Language(Lang::En));
         let kept = app.settings();
@@ -9060,17 +9061,17 @@ mod tests {
     }
 
     #[test]
-    fn with_no_language_chosen_a_start_speaks_the_system_s_or_else_the_one_last_spoken() {
+    fn with_no_language_chosen_a_start_speaks_simplified_chinese() {
         let spoke_english = Settings { spoken: Some("en".into()), ..Settings::default() };
         let mut app = App::new(Screen::Home, W, H, PPD);
         app.take_settings(Some(&spoke_english), Some(Lang::Hant));
-        assert_eq!(app.state.lang, Lang::Hant, "the one the system names");
+        assert_eq!(app.state.lang, Lang::Hans, "the default, whatever the system names");
         let mut fastboot = App::new(Screen::Fastboot, W, H, PPD);
         fastboot.take_settings(Some(&spoke_english), None);
-        assert_eq!(fastboot.state.lang, Lang::En, "a start that names none, as fastboot's");
+        assert_eq!(fastboot.state.lang, Lang::Hans, "a start that names none, as fastboot's");
         let mut first = App::new(Screen::Fastboot, W, H, PPD);
         first.take_settings(None, None);
-        assert_eq!(first.state.lang, State::default().lang, "and with nothing kept, the pages' own");
+        assert_eq!(first.state.lang, Lang::Hans, "and with nothing kept, the pages' own");
     }
 
     #[test]

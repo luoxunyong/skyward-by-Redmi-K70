@@ -121,9 +121,12 @@ fn open(service: &KeyMint) -> Result<Opened> {
     })();
     match mounted {
         Ok((checked, filesystem)) => Ok(Opened { mapped, filesystem, checked }),
-        Err(e) => match dm::remove(MAPPED) {
-            Ok(()) => Err(e),
-            Err(r) => Err(e.context(format!("removing {MAPPED} afterwards failed too: {r:#}"))),
+        Err(e) => match dm::status(MAPPED)? {
+            Some(_) => match dm::remove(MAPPED) {
+                Ok(()) => Err(e),
+                Err(r) => Err(e.context(format!("removing {MAPPED} afterwards failed too: {r:#}"))),
+            },
+            None => Err(e),
         },
     }
 }
@@ -133,12 +136,25 @@ fn open(service: &KeyMint) -> Result<Opened> {
 /// and the device the filesystem is read and written through.
 fn map(service: &KeyMint) -> Result<(Vec<Entry>, PathBuf)> {
     let entries = skyward_block::fstab::read(MOUNT)?;
-    let entry = entries.first().with_context(|| format!("the phone's own table says nothing about {MOUNT}"))?;
-    let encryption = Encryption::of(entry)?;
+    let first = entries.first().with_context(|| format!("the phone's own table says nothing about {MOUNT}"))?;
+    let first_device = skyward_block::fstab::device(first)?;
+    // The table may name the partition once per filesystem it might hold,
+    // and a decryption package may leave the partition unencrypted. What
+    // the raw partition holds says which entry is the one; an entry
+    // without metadata_encryption is mounted as it is, with no key asked
+    // for and no device-mapper over it.
+    let holds = skyward_block::probe::filesystem(Path::new(&first_device)).ok().flatten();
+    let entry = entries.iter().find(|e| holds.as_deref() == Some(e.filesystem.as_str())).unwrap_or(first);
     let device = skyward_block::fstab::device(entry)?;
-    let key = storage_key(service, entry, &encryption)?;
-    let sectors = skyward_block::size_bytes(&device)? / 512;
-    let mapped = dm::create(MAPPED, &[target(&device, sectors, &key, &encryption)], false)?;
+    let mapped = match entry.extra("metadata_encryption") {
+        None => PathBuf::from(device),
+        Some(_) => {
+            let encryption = Encryption::of(entry)?;
+            let key = storage_key(service, entry, &encryption)?;
+            let sectors = skyward_block::size_bytes(&device)? / 512;
+            dm::create(MAPPED, &[target(&device, sectors, &key, &encryption)], false)?
+        }
+    };
     Ok((entries, mapped))
 }
 
@@ -152,7 +168,10 @@ pub fn map_unmounted(service: &KeyMint) -> Result<PathBuf> {
 
 /// Take away the mapping [`map_unmounted`] made.
 pub fn unmap() -> Result<()> {
-    dm::remove(MAPPED)
+    match dm::status(MAPPED)? {
+        Some(_) => dm::remove(MAPPED),
+        None => Ok(()),
+    }
 }
 
 /// Show the owner's shared storage at /sdcard; shown already, it stays.
