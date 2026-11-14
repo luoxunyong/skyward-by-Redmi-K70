@@ -6729,20 +6729,9 @@ impl App {
                 }
                 Drag::Confirm { which, track, grab } => {
                     let travel = (track.w - track.h).max(1.0);
-                    let along = ((x - grab - track.x) / travel).clamp(0.0, 1.0);
-                    self.state.confirm = along;
-                    if along > SLID {
-                        // The knob has come to the end: it goes back to its
-                        // place at once and the action goes on, rather than
-                        // waiting at the end for the finger to lift.
-                        self.state.confirm = 0.0;
-                        self.repaint_confirm(&t, f, which, track);
-                        fx.extend(self.confirmed(which, now));
-                        self.drag = Drag::Held;
-                    } else {
-                        self.repaint_confirm(&t, f, which, track);
-                        self.drag = Drag::Confirm { which, track, grab };
-                    }
+                    self.state.confirm = ((x - grab - track.x) / travel).clamp(0.0, 1.0);
+                    self.repaint_confirm(&t, f, which, track);
+                    self.drag = Drag::Confirm { which, track, grab };
                 }
                 Drag::Pattern => {
                     self.trace(&t, x, y + scroll);
