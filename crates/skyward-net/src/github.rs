@@ -3,6 +3,8 @@
 
 use anyhow::{bail, ensure, Context, Result};
 use serde::Deserialize;
+use std::io::Read;
+use std::time::{Duration, Instant};
 
 /// Where GitHub answers which release of Skyward is the newest.
 pub const LATEST: &str = "https://api.github.com/repos/kirklin/skyward/releases/latest";
@@ -37,13 +39,65 @@ pub struct Build {
     pub sha256: String,
 }
 
+/// A GitHub download mirror: the name the pages show, and the prefix its
+/// address takes before the release's own link.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Mirror {
+    pub name: &'static str,
+    pub prefix: &'static str,
+}
+
+/// The mirrors tried beside github.com itself. Each takes the release's
+/// own address after the prefix; one that is down or cannot carry the file
+/// is passed over by the download.
+pub const MIRRORS: &[Mirror] = &[
+    Mirror { name: "ghfast", prefix: "https://ghfast.top/" },
+    Mirror { name: "ghproxy", prefix: "https://ghproxy.net/" },
+    Mirror { name: "gh-proxy", prefix: "https://gh-proxy.com/" },
+    Mirror { name: "moeyy", prefix: "https://github.moeyy.xyz/" },
+    Mirror { name: "gitmirror", prefix: "https://hub.gitmirror.com/" },
+    Mirror { name: "llkk", prefix: "https://gh.llkk.cc/" },
+];
+
 impl Build {
-    /// Where to download the zip from, in the order to try: the file's own
-    /// short-lived address, where GitHub's API gave one, then the release's
-    /// link on github.com, which some networks do not reach.
+    /// Where to download the zip from: the file's own short-lived address,
+    /// where GitHub's API gave one, then the release's link on github.com,
+    /// then the mirrors that front it.
     pub fn sources(&self, located: Option<String>) -> Vec<String> {
-        located.into_iter().chain([self.link.clone()]).collect()
+        let mut out: Vec<String> = located.into_iter().collect();
+        out.push(self.link.clone());
+        out.extend(MIRRORS.iter().map(|m| format!("{}{}", m.prefix, self.link)));
+        out
     }
+}
+
+/// What a source of `link` is called on the pages: GitHub itself, one of the
+/// mirrors, or GitHub's API handing out a short-lived address.
+pub fn source_name(url: &str, link: &str) -> String {
+    if url == link {
+        return "GitHub".into();
+    }
+    for mirror in MIRRORS {
+        if url == format!("{}{}", mirror.prefix, link) {
+            return mirror.name.into();
+        }
+    }
+    "GitHub API".into()
+}
+
+/// How long `url` took to answer a one-byte request, or `None` where it did
+/// not answer with the file. The agent is made for short probes.
+pub fn probe(agent: &ureq::Agent, url: &str) -> Option<Duration> {
+    let start = Instant::now();
+    let mut response = agent.get(url).header("Range", "bytes=0-0").call().ok()?;
+    let status = response.status();
+    if !status.is_success() && !status.is_redirection() {
+        return None;
+    }
+    let mut byte = [0u8; 1];
+    let mut body = response.body_mut().as_reader();
+    let _ = body.read(&mut byte);
+    Some(start.elapsed())
 }
 
 #[derive(Deserialize)]
@@ -173,8 +227,13 @@ mod tests {
     fn a_zip_is_downloaded_from_where_github_sends_it_then_from_its_link() {
         let build = newest(ANSWERED_013, "ishtar", "0.1.2").unwrap().build.unwrap();
         let link = "https://github.com/kirklin/skyward/releases/download/v0.1.3/skyward-v0.1.3-ishtar-OS3.0.308.0.WMACNXM.zip";
-        assert_eq!(build.sources(Some("https://release-assets.githubusercontent.com/a?sig=1".into())), ["https://release-assets.githubusercontent.com/a?sig=1", link]);
-        assert_eq!(build.sources(None), [link], "where GitHub's API gave no address");
+        let sources = build.sources(Some("https://release-assets.githubusercontent.com/a?sig=1".into()));
+        assert_eq!(&sources[..2], ["https://release-assets.githubusercontent.com/a?sig=1", link]);
+        assert_eq!(sources.len(), 2 + MIRRORS.len());
+        assert_eq!(source_name(&sources[2], link), MIRRORS[0].name);
+        let direct = build.sources(None);
+        assert_eq!(direct[0], link, "where GitHub's API gave no address");
+        assert_eq!(direct.len(), 1 + MIRRORS.len());
     }
 
     /// A server on this computer that answers one request with `answer`,

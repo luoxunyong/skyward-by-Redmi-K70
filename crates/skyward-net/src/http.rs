@@ -20,6 +20,10 @@ const CONNECT: Duration = Duration::from_secs(15);
 /// taken as lost: a download read as it comes has no end to wait for.
 const STALL: Duration = Duration::from_secs(30);
 
+/// How long a mirror latency probe may take to reach and answer.
+const PROBE_CONNECT: Duration = Duration::from_secs(4);
+const PROBE_STALL: Duration = Duration::from_secs(4);
+
 #[derive(Debug)]
 struct Lookup(Servers);
 
@@ -43,11 +47,20 @@ impl Resolver for Lookup {
 /// An agent that looks names up in `servers`, and gives a server's answer
 /// whatever its status: the caller says what a status means.
 pub fn agent(servers: Servers) -> ureq::Agent {
+    with_timeouts(servers, CONNECT, STALL)
+}
+
+/// An agent for the short question of a mirror's latency.
+pub fn probe_agent(servers: Servers) -> ureq::Agent {
+    with_timeouts(servers, PROBE_CONNECT, PROBE_STALL)
+}
+
+fn with_timeouts(servers: Servers, connect: Duration, stall: Duration) -> ureq::Agent {
     let config = ureq::Agent::config_builder()
         .proxy(None)
-        .timeout_connect(Some(CONNECT))
-        .timeout_per_read(Some(STALL))
-        .timeout_per_write(Some(STALL))
+        .timeout_connect(Some(connect))
+        .timeout_per_read(Some(stall))
+        .timeout_per_write(Some(stall))
         .http_status_as_error(false)
         .build();
     ureq::Agent::with_parts(config, DefaultConnector::new(), Lookup(servers))
