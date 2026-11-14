@@ -3000,7 +3000,7 @@ pub fn skyward_update(cx: &Ctx) -> Frame {
     let y = widgets::section(&mut c, t, f, y, l.pick(["在线更新", "線上更新", "Online update"]));
     let y = match &cx.state.skyward_sources {
         Some(sources) if !sources.is_empty() => {
-            let y = widgets::section(&mut c, t, f, y, l.pick(["下载源", "下載來源", "Download sources"]));
+            let y = widgets::section(&mut c, t, f, y, l.pick(["GitHub 镜像源", "GitHub 鏡像來源", "GitHub mirrors"]));
             let took: Vec<String> = sources
                 .iter()
                 .map(|(_, ms)| match ms {

@@ -6,10 +6,15 @@ use serde::Deserialize;
 use std::io::Read;
 use std::time::{Duration, Instant};
 
-/// Where GitHub answers which release of Skyward is the newest: the fork
-/// this recovery is built and kept in, whose releases carry the builds for
-/// the phones it is made for.
-pub const LATEST: &str = "https://api.github.com/repos/luoxunyong/skyward-by-Redmi-K70/releases/latest";
+/// Where GitHub lists Skyward's releases, newest first: the fork this
+/// recovery is built and kept in, whose releases carry the builds for the
+/// phones it is made for. The list holds pre-releases too, which is how a
+/// build is published here; `/latest` leaves them out.
+pub const LATEST: &str = "https://api.github.com/repos/luoxunyong/skyward-by-Redmi-K70/releases?per_page=20";
+
+/// The releases page on github.com, read where the API turns the phone
+/// down, as an address that asked too often is.
+pub const PAGE: &str = "https://github.com/luoxunyong/skyward-by-Redmi-K70/releases";
 
 /// The version of GitHub's API the answer is read as.
 const API_VERSION: &str = "2022-11-28";
@@ -17,7 +22,8 @@ const API_VERSION: &str = "2022-11-28";
 /// The newest release, as the build of Skyward that asked sees it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Newest {
-    /// Its version, such as 0.1.4.
+    /// Its version, such as 0.1.4, or the build a `build-<build>-<time>`
+    /// tag names.
     pub version: String,
     /// It is newer than the build that asked.
     pub newer: bool,
@@ -60,6 +66,14 @@ pub const MIRRORS: &[Mirror] = &[
     Mirror { name: "gitmirror", prefix: "https://hub.gitmirror.com/" },
     Mirror { name: "llkk", prefix: "https://gh.llkk.cc/" },
 ];
+
+/// The releases page and the mirrors fronting it, for timing the sources
+/// when no build is known.
+pub fn page_sources() -> Vec<String> {
+    let mut out = vec![PAGE.to_string()];
+    out.extend(MIRRORS.iter().map(|m| format!("{}{}", m.prefix, PAGE)));
+    out
+}
 
 impl Build {
     /// Where to download the zip from: the file's own short-lived address,
@@ -125,27 +139,33 @@ struct Message {
     message: String,
 }
 
-/// The newest release that `answer`, GitHub's answer at [`LATEST`], tells
-/// of, and its zip for the phone `codename` names, as the build of version
-/// `running` sees it.
+/// The newest release that `answer`, GitHub's answer at [`LATEST`] or one
+/// release of it, tells of, and its zip for the phone `codename` names, as
+/// the build of version `running` sees it.
 pub fn newest(answer: &str, codename: &str, running: &str) -> Result<Newest> {
+    newest_with(answer, codename, running, "")
+}
+
+/// [`newest`], with the build `running_build` that asks, for releases
+/// tagged `build-<build>-<time>`.
+fn newest_with(answer: &str, codename: &str, running: &str, running_build: &str) -> Result<Newest> {
     let release: Release = serde_json::from_str(answer).context("read GitHub's answer")?;
+    newest_release(release, codename, running, running_build)
+}
+
+/// The first release in `answer`, GitHub's answer at [`LATEST`], which
+/// lists them newest first, and its zip for the phone `codename` names.
+fn newest_releases(answer: &str, codename: &str, running: &str, running_build: &str) -> Result<Newest> {
+    let releases: Vec<Release> = serde_json::from_str(answer).context("read GitHub's answer")?;
+    let release = releases.into_iter().next().context("GitHub names no release")?;
+    newest_release(release, codename, running, running_build)
+}
+
+/// The version `release` carries and its zip for `codename`.
+fn newest_release(release: Release, codename: &str, running: &str, running_build: &str) -> Result<Newest> {
     let tag = release.tag_name;
-    let version = tag.strip_prefix('v').with_context(|| format!("the newest release is tagged {tag}, which is not v and a version"))?;
-    let newest = semver::Version::parse(version).with_context(|| format!("the newest release is tagged {tag}"))?;
-    let this = semver::Version::parse(running).with_context(|| format!("this build's version is {running}"))?;
-    // Each zip is named skyward-, the tag and the phone's codename, and
-    // then whatever its maker calls it: the stock build the image is made
-    // on, or nothing at all, which is what a release holding one phone's
-    // build alone is named. The name has to end there, so `vermeer` is not
-    // taken for `vermeerx`.
-    let start = format!("skyward-{tag}-{codename}");
-    let build = match release.assets.into_iter().find(|a| {
-        a.name
-            .strip_suffix(".zip")
-            .and_then(|stem| stem.strip_prefix(&start))
-            .is_some_and(|rest| rest.is_empty() || rest.starts_with('-'))
-    }) {
+    let (version, newer) = version_and_newer(&tag, running, running_build)?;
+    let build = match release.assets.into_iter().find(|a| is_for(&a.name, codename)) {
         None => None,
         Some(a) => {
             let sha256 = a.digest.as_deref().and_then(|d| d.strip_prefix("sha256:")).with_context(|| format!("GitHub gives no SHA-256 of {}", a.name))?;
@@ -153,12 +173,46 @@ pub fn newest(answer: &str, codename: &str, running: &str) -> Result<Newest> {
             Some(Build { sha256: sha256.to_lowercase(), name: a.name, url: a.url, link: a.browser_download_url, size: a.size })
         }
     };
-    Ok(Newest { version: version.to_string(), newer: newest > this, build })
+    Ok(Newest { version, newer, build })
+}
+
+/// The version a release's `tag` names, and whether it is newer than the
+/// build that asked. This fork tags its builds `build-<build>-<time>`, and
+/// compares them by the build; a `v<version>` tag is compared by its
+/// version, as upstream releases are.
+fn version_and_newer(tag: &str, running: &str, running_build: &str) -> Result<(String, bool)> {
+    if let Some(rest) = tag.strip_prefix("build-") {
+        let id = rest.split('-').next().unwrap_or_default();
+        ensure!(!id.is_empty(), "the newest release is tagged {tag}, which names no build");
+        return Ok((id.to_string(), running_build.is_empty() || !running_build.eq_ignore_ascii_case(id)));
+    }
+    let version = tag.strip_prefix('v').with_context(|| format!("the newest release is tagged {tag}, which is not v and a version"))?;
+    let newest = semver::Version::parse(version).with_context(|| format!("the newest release is tagged {tag}"))?;
+    let this = semver::Version::parse(running).with_context(|| format!("this build's version is {running}"))?;
+    Ok((version.to_string(), newest > this))
+}
+
+/// Whether `name` is a zip for the phone `codename` names. This fork names
+/// its build `skyward-<codename>-<version>-<build>-<date>.zip`, and the
+/// upstream one `skyward-<tag>-<codename>-<stock>.zip`, so the codename is
+/// looked for as a whole part of the name.
+fn is_for(name: &str, codename: &str) -> bool {
+    name.strip_suffix(".zip")
+        .is_some_and(|stem| stem.starts_with("skyward-") && stem.split('-').any(|part| part.eq_ignore_ascii_case(codename)))
 }
 
 /// Ask GitHub for Skyward's newest release, and its zip for the phone
-/// `codename` names, as the build of version `running`.
-pub fn ask(agent: &ureq::Agent, codename: &str, running: &str) -> Result<Newest> {
+/// `codename` names, as the build of version `running` and commit `build`.
+/// The API is asked first; where it turns the phone down, as an address
+/// that asked too often is, the releases page is read instead.
+pub fn ask(agent: &ureq::Agent, codename: &str, running: &str, build: &str) -> Result<Newest> {
+    ask_api(agent, codename, running, build).or_else(|api| {
+        ask_page(agent, codename, running, build).with_context(|| format!("{api:#}"))
+    })
+}
+
+/// Ask GitHub's API for its releases, newest first, and read the first.
+fn ask_api(agent: &ureq::Agent, codename: &str, running: &str, build: &str) -> Result<Newest> {
     let mut response = agent
         .get(LATEST)
         .header("Accept", "application/vnd.github+json")
@@ -171,7 +225,110 @@ pub fn ask(agent: &ureq::Agent, codename: &str, running: &str) -> Result<Newest>
     if !status.is_success() {
         bail!(refusal(status, &body));
     }
-    newest(&body, codename, running)
+    newest_releases(&body, codename, running, build)
+}
+
+/// Read GitHub's releases page and the newest release's assets for the
+/// phone `codename` names. The page lists pre-releases, which `/latest`
+/// leaves out, and carries each asset's SHA-256.
+fn ask_page(agent: &ureq::Agent, codename: &str, running: &str, build: &str) -> Result<Newest> {
+    let mut response = agent
+        .get(PAGE)
+        .header("User-Agent", format!("Skyward/{running}"))
+        .call()
+        .with_context(|| format!("ask {PAGE}"))?;
+    let status = response.status();
+    let body = response.body_mut().read_to_string().with_context(|| format!("read {PAGE}"))?;
+    ensure!(status.is_success(), "{PAGE} answered {status}");
+    let tag = first_tag(&body).with_context(|| format!("{PAGE} names no release"))?;
+    let url = format!("https://github.com/luoxunyong/skyward-by-Redmi-K70/releases/expanded_assets/{tag}");
+    let mut response = agent
+        .get(&url)
+        .header("User-Agent", format!("Skyward/{running}"))
+        .call()
+        .with_context(|| format!("ask {url}"))?;
+    let status = response.status();
+    let assets = response.body_mut().read_to_string().with_context(|| format!("read {url}"))?;
+    ensure!(status.is_success(), "{url} answered {status}");
+    let (version, newer) = version_and_newer(&tag, running, build)?;
+    let build = page_build(&assets, codename)?;
+    Ok(Newest { version, newer, build })
+}
+
+/// The tag of the newest release on the releases page. Its table of
+/// contents names it first, and its own link does too.
+fn first_tag(html: &str) -> Option<String> {
+    const ANCHOR: &str = "\"anchorId\":\"release-";
+    if let Some(at) = html.find(ANCHOR) {
+        let rest = &html[at + ANCHOR.len()..];
+        if let Some(end) = rest.find('"') {
+            if end > 0 {
+                return Some(rest[..end].to_string());
+            }
+        }
+    }
+    const LINK: &str = "/releases/tag/";
+    let at = html.find(LINK)? + LINK.len();
+    let rest = &html[at..];
+    let end = rest.find(|c: char| matches!(c, '"' | '\'' | '?' | '#' | '<' | ' ')).unwrap_or(rest.len());
+    (end > 0).then(|| rest[..end].to_string())
+}
+
+/// The zip for `codename` among the assets the releases page shows, with
+/// its link, SHA-256 and size. None where the release has no zip for it.
+fn page_build(assets: &str, codename: &str) -> Result<Option<Build>> {
+    for block in assets.split("<li").skip(1) {
+        let block = &block[..block.find("</li>").unwrap_or(block.len())];
+        let Some(href) = between(block, "href=\"", "\"") else { continue };
+        if !href.contains("/releases/download/") {
+            continue;
+        }
+        let name = href.rsplit('/').next().unwrap_or_default();
+        if !is_for(name, codename) {
+            continue;
+        }
+        let sha256 = sha256_in(block).with_context(|| format!("the release page gives {name} no SHA-256"))?;
+        let link = if href.starts_with("http") { href.to_string() } else { format!("https://github.com{href}") };
+        return Ok(Some(Build { name: name.to_string(), url: link.clone(), link, size: shown_size(block).unwrap_or(0), sha256 }));
+    }
+    Ok(None)
+}
+
+/// What lies in `s` between `before` and the next `after`.
+fn between<'a>(s: &'a str, before: &str, after: &str) -> Option<&'a str> {
+    let at = s.find(before)? + before.len();
+    let rest = &s[at..];
+    let end = rest.find(after)?;
+    Some(&rest[..end])
+}
+
+/// The first `sha256:` in `block` followed by 64 hex digits, in lowercase.
+fn sha256_in(block: &str) -> Option<String> {
+    let mut rest = block;
+    while let Some(at) = rest.find("sha256:") {
+        let start = at + "sha256:".len();
+        let hex = &rest[start..];
+        let end = hex.find(|c: char| !c.is_ascii_hexdigit()).unwrap_or(hex.len());
+        if end == 64 {
+            return Some(hex[..end].to_ascii_lowercase());
+        }
+        rest = &rest[start..];
+    }
+    None
+}
+
+/// The size the page shows beside an asset, such as `41.7 MB`, in bytes.
+fn shown_size(block: &str) -> Option<u64> {
+    for (unit, scale) in [(" MB", 1_000_000u64), (" KB", 1_000u64), (" GB", 1_000_000_000u64), (" B", 1u64)] {
+        if let Some(at) = block.find(unit) {
+            let before = &block[..at];
+            let start = before.rfind(|c: char| !(c.is_ascii_digit() || c == '.')).map_or(0, |i| i + 1);
+            if let Ok(n) = before[start..].parse::<f64>() {
+                return Some((n * scale as f64).round() as u64);
+            }
+        }
+    }
+    None
 }
 
 /// Where the file a build's `url` hands out is now, as GitHub's API sends
@@ -318,5 +475,34 @@ mod tests {
         let untagged = ANSWERED_013.replace("\"tag_name\":\"v0.1.3\"", "\"tag_name\":\"nightly\"");
         assert!(newest(&untagged, "ishtar", "0.1.2").is_err());
         assert!(newest("{}", "ishtar", "0.1.2").is_err());
+    }
+
+    #[test]
+    fn a_build_tag_names_the_build_and_is_newer_unless_it_is_this_one() {
+        let answered = r#"{"tag_name":"build-7d47475-20261114-195313","assets":[{"url":"https://api.github.com/repos/luoxunyong/skyward-by-Redmi-K70/releases/assets/1","name":"skyward-vermeer-v0.2.0-7d47475-20261114.zip","size":43682291,"digest":"sha256:44eb4518956aaeb97e8851cd04f954fc6b013a2b01bb6df5e6916bbf8e3a40c3","browser_download_url":"https://github.com/luoxunyong/skyward-by-Redmi-K70/releases/download/build-7d47475-20261114-195313/skyward-vermeer-v0.2.0-7d47475-20261114.zip"}]}"#;
+        let n = newest_with(answered, "vermeer", "0.2.0", "7d47475").unwrap();
+        assert_eq!(n.version, "7d47475");
+        assert!(!n.newer, "the build running is the release");
+        assert_eq!(n.build.expect("the phone's build").size, 43682291);
+        assert!(newest_with(answered, "vermeer", "0.2.0", "f4836b4").unwrap().newer, "another build is newer");
+    }
+
+    #[test]
+    fn a_release_list_is_read_newest_first() {
+        let list = format!("[{ANSWERED_013}]");
+        assert_eq!(newest_releases(&list, "ishtar", "0.1.2", "").unwrap().version, "0.1.3");
+    }
+
+    #[test]
+    fn the_release_page_names_its_newest_release_and_the_phone_s_zip() {
+        let page = r#"<script>{"payload":{"releasesIndexRoute":{"toc":[{"anchorId":"release-build-7d47475-20261114-195313"},{"anchorId":"release-0.1.4"}]}}}</script>"#;
+        assert_eq!(first_tag(page).as_deref(), Some("build-7d47475-20261114-195313"));
+        let assets = r#"<li><a href="/luoxunyong/skyward-by-Redmi-K70/releases/download/build-7d47475-20261114-195313/skyward-vermeer-v0.2.0-7d47475-20261114.zip"><span class="text-bold">skyward-vermeer-v0.2.0-7d47475-20261114.zip</span></a><span class="Truncate-text">sha256:44eb4518956aaeb97e8851cd04f954fc6b013a2b01bb6df5e6916bbf8e3a40c3</span><span>41.7 MB</span></li>"#;
+        let build = page_build(assets, "vermeer").unwrap().expect("the phone's build");
+        assert_eq!(build.name, "skyward-vermeer-v0.2.0-7d47475-20261114.zip");
+        assert_eq!(build.sha256, "44eb4518956aaeb97e8851cd04f954fc6b013a2b01bb6df5e6916bbf8e3a40c3");
+        assert_eq!(build.size, 41_700_000);
+        assert_eq!(build.link, "https://github.com/luoxunyong/skyward-by-Redmi-K70/releases/download/build-7d47475-20261114-195313/skyward-vermeer-v0.2.0-7d47475-20261114.zip");
+        assert_eq!(build.url, build.link, "the page has no API address, and the link sends the download on");
     }
 }

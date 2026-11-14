@@ -156,10 +156,22 @@ impl Worker {
                     Task::CheckSkyward { probe, codename } => {
                         let a = http::agent(servers.clone());
                         *using.lock().expect("the agent is not held by a thread that panicked") = Some(a.clone());
-                        let answer = github::ask(&a, &codename, skyward_info::VERSION).map_err(|e| unanswered(&e, github::LATEST, &probe, &servers));
-                        if let Ok(newest) = &answer {
-                            if let Some(build) = &newest.build {
-                                let (_, _, list) = fastest(&servers, build.sources(None), &build.link);
+                        let answer = github::ask(&a, &codename, skyward_info::VERSION, skyward_info::BUILD)
+                            .map_err(|e| unanswered(&e, github::LATEST, &probe, &servers));
+                        match &answer {
+                            Ok(newest) => {
+                                let (list, link) = match &newest.build {
+                                    Some(build) => (build.sources(None), build.link.as_str()),
+                                    None => (github::page_sources(), github::PAGE),
+                                };
+                                let (_, _, list) = fastest(&servers, list, link);
+                                tell(Event::SkywardSources(list));
+                            }
+                            Err(_) => {
+                                // The check may be turned down, but the
+                                // mirrors can still be timed, so the page
+                                // shows where a build would come from.
+                                let (_, _, list) = fastest(&servers, github::page_sources(), github::PAGE);
                                 tell(Event::SkywardSources(list));
                             }
                         }

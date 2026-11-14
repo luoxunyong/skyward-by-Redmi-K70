@@ -11765,8 +11765,10 @@ mod tests {
         let mut app = App::new(Screen::Settings, W, H, PPD);
         app.state.wlan = Some(connected("Skyward"));
         app.state.recovery_partitions = true;
+        app.state.skyward_sources = Some(vec![("GitHub".into(), Some(40))]);
         app.refresh();
         assert_eq!(tap(&mut app, &f, &i, Action::Open(Screen::SkywardUpdate)), vec![Effect::CheckSkyward]);
+        assert_eq!(app.state.skyward_sources, None, "a fresh check lets the old times go");
         app.skyward_checked(Err(Unanswered::Failed("GitHub answered 403 Forbidden: API rate limit exceeded".into())));
         app.key(Key::Back, 0);
         assert_eq!(tap(&mut app, &f, &i, Action::Open(Screen::SkywardUpdate)), vec![Effect::CheckSkyward], "a failed check is tried again");
@@ -11774,6 +11776,15 @@ mod tests {
         assert!(!app.frame(&f, &i).hits.iter().any(|h| h.action == Action::UpdateSkyward), "nothing newer to update to");
         app.key(Key::Back, 0);
         assert!(tap(&mut app, &f, &i, Action::Open(Screen::SkywardUpdate)).is_empty(), "an answer heard is not asked again");
+    }
+
+    #[test]
+    fn a_check_that_is_turned_down_keeps_the_sources_it_timed() {
+        let mut app = App::new(Screen::SkywardUpdate, W, H, PPD);
+        let sources = vec![("GitHub".to_string(), Some(40)), ("ghfast".to_string(), Some(12))];
+        app.skyward_sources(sources.clone());
+        app.skyward_checked(Err(Unanswered::Failed("GitHub answered 403 Forbidden: API rate limit exceeded".into())));
+        assert_eq!(app.state.skyward_sources, Some(sources), "the mirrors are still there to be read");
     }
 
     #[test]

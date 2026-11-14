@@ -13,6 +13,10 @@ use std::str::FromStr;
 /// Version of this build, shown on the About page.
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 
+/// The commit this build was made from, short as the build helper names it
+/// and as a release's `build-<commit>-<time>` tag does.
+pub const BUILD: &str = env!("SKYWARD_BUILD");
+
 const CPU: &str = "/sys/devices/system/cpu";
 const POWER_SUPPLY: &str = "/sys/class/power_supply";
 const SYS_BLOCK: &str = "/sys/class/block";
