@@ -811,19 +811,19 @@ fn main() -> Result<()> {
             skyward_online(app);
             app.skyward_checked(Ok(skyward_newest()));
             let stage = Some(SkywardStage::Download(Progress::Downloading { done: 17_104_000, total: 43_145_196 }));
-            app.state.skyward_job = Some(SkywardJob { stage, rate: 3_260_000, outcome: None, stopping: false });
+            app.state.skyward_job = Some(SkywardJob { stage, rate: 3_260_000, outcome: None, stopping: false, source: None });
         }),
         ("193-skyward-update-light-writing", Screen::SkywardUpdate, false, &|app| {
             skyward_online(app);
             app.skyward_checked(Ok(skyward_newest()));
             let stage = Some(SkywardStage::Write { done: 140_000_000, total: 419_430_400 });
-            app.state.skyward_job = Some(SkywardJob { stage, rate: 0, outcome: None, stopping: false });
+            app.state.skyward_job = Some(SkywardJob { stage, rate: 0, outcome: None, stopping: false, source: None });
         }),
         ("194-skyward-update-light-updated", Screen::SkywardUpdate, false, &|app| {
             skyward_online(app);
             app.skyward_checked(Ok(skyward_newest()));
             let outcome = Some(SkywardEnd::Updated(vec![Slot::A, Slot::B]));
-            app.state.skyward_job = Some(SkywardJob { stage: None, rate: 0, outcome, stopping: false });
+            app.state.skyward_job = Some(SkywardJob { stage: None, rate: 0, outcome, stopping: false, source: None });
         }),
         ("195-skyward-update-dark-latest", Screen::SkywardUpdate, true, &|app| {
             skyward_online(app);
@@ -834,7 +834,7 @@ fn main() -> Result<()> {
             app.skyward_checked(Ok(skyward_newest()));
             let why = "/dev/block/by-name/recovery_a reads back different from what was written";
             let outcome = Some(SkywardEnd::WriteFailed(vec![Slot::A], why.into()));
-            app.state.skyward_job = Some(SkywardJob { stage: None, rate: 0, outcome, stopping: false });
+            app.state.skyward_job = Some(SkywardJob { stage: None, rate: 0, outcome, stopping: false, source: None });
         }),
         ("197-skyward-update-light-unanswered", Screen::SkywardUpdate, false, &|app| {
             skyward_online(app);
