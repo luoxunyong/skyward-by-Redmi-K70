@@ -516,7 +516,11 @@ const TAG_BYTES: usize = 16;
 /// owner's own secret gave. The owner's files open, their shared storage
 /// shows at /sdcard.
 fn open_user_files(service: &KeyMint, user: u32, credential: Option<&[u8]>, owner: Option<&Token>) -> Result<Note> {
-    let protector = protector(user)?;
+    let Some(protector) = protector(user)? else {
+        // No synthetic password: the user set no screen lock, and there is
+        // nothing for a credential to answer or to open behind one.
+        return Ok(Note::default());
+    };
     let stretched = match &protector.lock {
         Some(lock) => {
             let typed = match made_up_credential(service, user, &protector.id, owner)? {
