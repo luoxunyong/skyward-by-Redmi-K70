@@ -439,6 +439,12 @@ pub fn unmount_partitions(slot: Slot) -> Result<()> {
 /// as long as the recovery does. What they serve is needed to read the
 /// installed system, not to write a new one, so they are ended here and
 /// the layout is free to be rewritten.
+///
+/// The pages pinned for those services are mapped from the same
+/// partitions, and a mapping of this recovery's own keeps the mount, and
+/// the device-mapper device under it, standing even after the mount is
+/// detached. The services the pages were kept for are ended above, so the
+/// mappings are let go before the devices are asked to.
 pub fn release_whole(slot: Slot) -> Result<()> {
     let md = skyward_lp::read(&super_device(), slot.number())?;
     // The bundles the vendor interface is read through are whole images
@@ -447,9 +453,21 @@ pub fn release_whole(slot: Slot) -> Result<()> {
     // just as a program running from it does. They are let go first, then
     // the programs, then the partitions themselves.
     release_bundles();
+    let mut ended = false;
+    let mut points = Vec::new();
     for p in slot_partitions(&md, slot) {
         let point = mount_point(base(p, slot));
-        end_running_from(&point);
+        ended |= end_running_from(&point);
+        points.push(point);
+    }
+    if ended {
+        // The programs ended above are let go by the kernel as init reaps
+        // them; the devices they held are free once that is done.
+        std::thread::sleep(std::time::Duration::from_millis(300));
+    }
+    let taken = release_own_mappings(&points);
+    if taken > 0 {
+        let _ = skyward_sys::kmsg(&format!("install: {taken} mappings this recovery held of the slot let go"));
     }
     // Every mount on those partitions comes off detached, so a program that
     // the kernel has not yet let go of does not keep the mount, nor the
@@ -464,21 +482,43 @@ pub fn release_whole(slot: Slot) -> Result<()> {
         let point = mount_point(base(p, slot));
         if mount::is_mount_point(&point).unwrap_or(false) {
             if let Err(e) = mount::umount_detach(&point) {
-                eprintln!("install: {} stays mounted, and the package goes on without it: {e:#}", point.display());
+                let _ = skyward_sys::kmsg(&format!(
+                    "install: {} stays mounted, and the package goes on without it: {e:#}",
+                    point.display()
+                ));
             }
         }
-        if let Err(e) = unmap(&p.name, &point) {
+        if let Err(e) = unmap_for_good(&p.name, &point) {
             // A device something still holds open is taken away by the
             // kernel once that holder lets go, which is what the deferral
             // asks for: the package's own unmapping then finds it gone.
             match skyward_block::dm::remove_deferred(&p.name) {
-                Ok(()) => eprintln!("install: device-mapper device {} is taken away once its last holder lets go", p.name),
-                Err(deferred) => eprintln!(
-                    "install: device-mapper device {} stays, and the package goes on without it: {e:#}; deferred too: {deferred:#}",
-                    p.name
-                ),
+                Ok(()) => {
+                    let _ = skyward_sys::kmsg(&format!(
+                        "install: device-mapper device {} is taken away once its last holder lets go",
+                        p.name
+                    ));
+                }
+                Err(deferred) => {
+                    let _ = skyward_sys::kmsg(&format!(
+                        "install: device-mapper device {} stays, and the package goes on without it: {e:#}; deferred too: {deferred:#}",
+                        p.name
+                    ));
+                }
             }
         }
+    }
+    let left: Vec<String> = slot_partitions(&md, slot)
+        .into_iter()
+        .filter(|p| skyward_block::dm::status(&p.name).ok().flatten().is_some())
+        .map(|p| p.name.clone())
+        .collect();
+    if !left.is_empty() {
+        let _ = skyward_sys::kmsg(&format!(
+            "install: {} of the slot's device-mapper devices are still there for the package to meet: {}",
+            left.len(),
+            left.join(", ")
+        ));
     }
     let metadata = Path::new(METADATA);
     if mount::is_mount_point(metadata).unwrap_or(false) {
@@ -487,10 +527,66 @@ pub fn release_whole(slot: Slot) -> Result<()> {
     Ok(())
 }
 
-/// End every program whose executable or working directory lies under
-/// `point`, giving it a moment to go.
-fn end_running_from(point: &Path) {
-    let Ok(entries) = std::fs::read_dir("/proc") else { return };
+/// [`unmap`], tried again for a moment: a program that was just ended is
+/// let go by the kernel as init reaps it, and a device it held is free
+/// only after that.
+fn unmap_for_good(name: &str, point: &Path) -> Result<()> {
+    let mut last = match unmap(name, point) {
+        Ok(()) => return Ok(()),
+        Err(e) => e,
+    };
+    for _ in 0..20 {
+        std::thread::sleep(std::time::Duration::from_millis(50));
+        match unmap(name, point) {
+            Ok(()) => return Ok(()),
+            Err(e) => last = e,
+        }
+    }
+    Err(last)
+}
+
+/// Let go of this recovery's own mappings of files under `points`, telling
+/// how many were let go. Pinning a service's pages maps them from the
+/// partition the service runs from, and the mapping outlives the service
+/// unless it is dropped here.
+fn release_own_mappings(points: &[PathBuf]) -> usize {
+    let Ok(maps) = fs::read_to_string("/proc/self/maps") else { return 0 };
+    let mut taken = 0;
+    for (start, end) in mappings_under(&maps, points) {
+        if unsafe { libc::munmap(start as *mut libc::c_void, (end - start) as usize) } == 0 {
+            taken += 1;
+        }
+    }
+    taken
+}
+
+/// The address ranges of an `/proc/self/maps` text that map files under
+/// `points`.
+fn mappings_under(maps: &str, points: &[PathBuf]) -> Vec<(u64, u64)> {
+    let mut found = Vec::new();
+    for line in maps.lines() {
+        let mut fields = line.split_whitespace();
+        let Some(range) = fields.next() else { continue };
+        let Some(path) = fields.nth(4) else { continue };
+        let path = Path::new(path);
+        if !path.is_absolute() || !points.iter().any(|p| path.starts_with(p)) {
+            continue;
+        }
+        let Some((start, end)) = range.split_once('-') else { continue };
+        let (Ok(start), Ok(end)) = (u64::from_str_radix(start, 16), u64::from_str_radix(end, 16)) else { continue };
+        if start < end {
+            found.push((start, end));
+        }
+    }
+    found
+}
+
+/// End every program whose executable, working directory, open files or
+/// mappings lie under `point`, telling whether any was found. The programs
+/// ended are let go by the kernel as init reaps them.
+fn end_running_from(point: &Path) -> bool {
+    let Ok(entries) = std::fs::read_dir("/proc") else { return false };
+    let mut ended = false;
     for entry in entries.flatten() {
         let name = entry.file_name();
         let Some(pid) = name.to_str().and_then(|n| n.parse::<libc::pid_t>().ok()) else { continue };
@@ -503,11 +599,11 @@ fn end_running_from(point: &Path) {
         if !runs_from(&root, point) {
             continue;
         }
-        eprintln!("install: ending {pid}, which runs from {}", point.display());
+        ended = true;
+        let _ = skyward_sys::kmsg(&format!("install: ending {pid}, which runs from {}", point.display()));
         unsafe { libc::kill(pid, libc::SIGKILL) };
     }
-    // The programs ended above are let go by the kernel as it reaps them.
-    std::thread::sleep(std::time::Duration::from_millis(300));
+    ended
 }
 
 /// Let go of every bundle the recovery mounted over a loop device: each is
@@ -593,4 +689,33 @@ fn runs_from(root: &Path, point: &Path) -> bool {
     }
     // What it has mapped: a library of the partition is enough to keep it.
     std::fs::read_to_string(root.join("maps")).is_ok_and(|maps| maps.lines().any(|line| line.split_whitespace().nth(5).is_some_and(|p| under(Path::new(p)))))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn mappings_of_the_slot_are_told_from_the_others() {
+        let maps = "\
+7f0000000000-7f0000001000 r--s 00000000 fd:01 123 /mnt/system/lib64/libc.so
+7f0000001000-7f0000002000 r--s 00000000 fd:01 124 /mnt/system_ext/lib64/libfoo.so
+7f0000002000-7f0000003000 r--s 00000000 fd:01 125 /vendor/lib64/libbar.so
+7f0000003000-7f0000004000 r--s 00000000 fd:01 126 /mnt/product/lib64/libbaz.so
+7f0000004000-7f0000005000 r-xp 00000000 00:00 0 /skyward/system-init
+7f0000005000-7f0000006000 rw-p 00000000 00:00 0 [heap]";
+        let points = vec![
+            PathBuf::from("/mnt/system"),
+            PathBuf::from("/mnt/system_ext"),
+            PathBuf::from("/vendor"),
+        ];
+        assert_eq!(
+            mappings_under(maps, &points),
+            vec![
+                (0x7f00_0000_0000, 0x7f00_0000_1000),
+                (0x7f00_0000_1000, 0x7f00_0000_2000),
+                (0x7f00_0000_2000, 0x7f00_0000_3000),
+            ]
+        );
+    }
 }

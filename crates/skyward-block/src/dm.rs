@@ -159,6 +159,17 @@ impl DmIoctl {
         io.name[..name.len()].copy_from_slice(name.as_bytes());
         Ok(io)
     }
+
+    /// The header for a device to be created with `uuid`: a name of its
+    /// own that outlives the minor the kernel gives it. A caller unmapping
+    /// it later waits for the node that name leads to; a device without one
+    /// is taken for one that never came up.
+    fn with_uuid(name: &str, uuid: &str) -> Result<DmIoctl> {
+        let mut io = DmIoctl::new(name)?;
+        ensure!(!uuid.is_empty() && uuid.len() < DM_UUID_LEN, "device-mapper uuid {uuid:?}");
+        io.uuid[..uuid.len()].copy_from_slice(uuid.as_bytes());
+        Ok(io)
+    }
 }
 
 /// The DM_TABLE_LOAD argument: the ioctl header, then each target's spec and
@@ -278,7 +289,8 @@ mod sys {
     /// make its node by. A device that fails to come up is removed again.
     pub fn activate(name: &str, targets: &[Target], readonly: bool) -> Result<(u32, u32)> {
         let ctl = control()?;
-        let mut io = DmIoctl::new(name)?;
+        let uuid = format!("skyward-{name}");
+        let mut io = DmIoctl::with_uuid(name, &uuid)?;
         call(&ctl, DM_DEV_CREATE, io.as_mut_bytes()).with_context(|| format!("create device-mapper device {name}"))?;
         let dev = decode(io.dev);
         let up = (|| -> Result<()> {
@@ -461,6 +473,13 @@ mod tests {
     fn request_codes_match_the_kernel_header() {
         assert_eq!(DM_DEV_CREATE, 0xc138_fd03);
         assert_eq!(DM_TABLE_LOAD, 0xc138_fd09);
+    }
+
+    #[test]
+    fn a_created_device_is_given_a_uuid_to_be_found_by() {
+        let io = DmIoctl::with_uuid("system_a", "skyward-system_a").unwrap();
+        assert_eq!(&io.uuid[..17], b"skyward-system_a\0");
+        assert_eq!(&io.name[..9], b"system_a\0");
     }
 
     #[test]
