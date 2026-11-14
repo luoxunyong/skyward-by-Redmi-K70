@@ -640,15 +640,15 @@ fn release_bundles() {
         let stem = Path::new(&file).file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default();
         for point in [Path::new("/apex").join(&stem), Path::new("/apex").join(&file)] {
             if mount::is_mount_point(&point).unwrap_or(false) {
-                eprintln!("install: letting go of the bundle at {}", point.display());
+                let _ = skyward_sys::kmsg(&format!("install: letting go of the bundle at {}", point.display()));
                 if let Err(e) = mount::umount_detach(&point) {
-                    eprintln!("install: the bundle at {} stays mounted: {e:#}", point.display());
+                    let _ = skyward_sys::kmsg(&format!("install: the bundle at {} stays mounted: {e:#}", point.display()));
                 }
             }
         }
-        eprintln!("install: taking away the loop device {name}, which holds {file}");
+        let _ = skyward_sys::kmsg(&format!("install: taking away the loop device {name}, which holds {file}"));
         if let Err(e) = detach_loop(&name) {
-            eprintln!("install: the loop device {name} stays: {e:#}");
+            let _ = skyward_sys::kmsg(&format!("install: the loop device {name} stays: {e:#}"));
         }
     }
     // What was let go above is reaped by the kernel over a moment.
@@ -659,7 +659,7 @@ fn release_bundles() {
 /// it was showing.
 fn detach_loop(name: &str) -> Result<()> {
     use std::os::fd::AsRawFd;
-    let path = Path::new("/dev").join(name);
+    let path = Path::new("/dev/block").join(name);
     let file = std::fs::OpenOptions::new()
         .read(true)
         .write(true)
