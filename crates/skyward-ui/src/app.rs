@@ -3416,6 +3416,11 @@ impl App {
         !self.display_on && self.state.lock.is_some()
     }
 
+    /// Whether the lock waits behind a panel kept dark but not rested.
+    pub fn locked_dark(&self) -> bool {
+        self.locked_dark
+    }
+
     /// The backlight at `now`: off, or this share of the brightness at the
     /// slider's top, which holds as the content goes dark after the panel
     /// is told to go off.

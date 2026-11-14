@@ -1104,6 +1104,7 @@ pub fn run(cfg: &DeviceConfig, font: &Path, mono: &Path, request: bcb::Request, 
     eprintln!("display {}", surface.describe());
     let mut inputs = Inputs::open(w, h, cfg.touch.writes.clone())?;
     let started = Instant::now();
+    let mut keep_at = Instant::now();
     let mut touch_known = false;
     // adbd and fastbootd ask over it to go over to fastboot and back.
     let control = Control::open()?;
@@ -1520,6 +1521,14 @@ pub fn run(cfg: &DeviceConfig, font: &Path, mono: &Path, request: bcb::Request, 
             touch_awake = locked;
         }
         let panel = app.panel(now);
+        if app.locked_dark() && keep_at.elapsed() >= std::time::Duration::from_millis(500) {
+            // The display driver collapses the panel's power when its last
+            // frame has stood still long enough, and the touch controller
+            // shares that supply. A frame now and then keeps it up while
+            // the lock waits behind the dark light.
+            surface.present(&screen)?;
+            keep_at = Instant::now();
+        }
         let locked_off = app.locked_off();
         let mut shown = false;
         if panel.is_some() {
