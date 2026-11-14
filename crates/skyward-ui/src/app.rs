@@ -6583,7 +6583,7 @@ impl App {
         self.stir(now);
         let t = self.theme();
         let m = t.m;
-        let (slop, edge) = (m.dp(8.0), m.dp(20.0));
+        let (slop, edge) = (m.dp(8.0), m.dp(24.0));
         let scroll = self.top().1;
         let mut fx = Vec::new();
         let pressing = self.pressing();
@@ -6683,7 +6683,11 @@ impl App {
                     self.tracker.add(now, y);
                     let (dx, dy) = (x - x0, y - y0);
                     self.drag = match at_edge {
-                        Some(from_left) if dx.abs() > slop && dx.abs() > dy.abs() => {
+                        // A touch that began at the edge is a back gesture
+                        // before it is a scroll, even when the finger also
+                        // wanders up or down on the way in. The page scrolls
+                        // only where the vertical travel clearly wins.
+                        Some(from_left) if dx.abs() > slop && dx.abs() > dy.abs() * 0.5 => {
                             self.dirty = true;
                             Drag::Edge { start: x0, from_left, armed: false, x, cy: y0 - m.dp(CUE_LIFT_DP) }
                         }
@@ -8561,6 +8565,28 @@ mod tests {
         app.touch(Touch::Down(10.0, 1600.0), &f, 0);
         app.touch(Touch::Move(90.0, 1605.0), &f, 0);
         app.touch(Touch::Move(320.0, 1610.0), &f, 0);
+        app.touch(Touch::Up, &f, 0);
+        assert_eq!(app.screen(), Screen::Home);
+    }
+
+    #[test]
+    fn swipe_from_the_right_edge_goes_back() {
+        let (f, i) = (fonts(), info());
+        let mut app = opened(Screen::Reboot, &f, &i);
+        app.touch(Touch::Down(W as f32 - 10.0, 1600.0), &f, 0);
+        app.touch(Touch::Move(W as f32 - 90.0, 1605.0), &f, 0);
+        app.touch(Touch::Move(W as f32 - 320.0, 1610.0), &f, 0);
+        app.touch(Touch::Up, &f, 0);
+        assert_eq!(app.screen(), Screen::Home);
+    }
+
+    #[test]
+    fn an_edge_swipe_that_wanders_up_or_down_still_goes_back() {
+        let (f, i) = (fonts(), info());
+        let mut app = opened(Screen::Reboot, &f, &i);
+        app.touch(Touch::Down(10.0, 1600.0), &f, 0);
+        app.touch(Touch::Move(90.0, 1740.0), &f, 0);
+        app.touch(Touch::Move(320.0, 1860.0), &f, 0);
         app.touch(Touch::Up, &f, 0);
         assert_eq!(app.screen(), Screen::Home);
     }
