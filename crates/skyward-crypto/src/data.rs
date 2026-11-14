@@ -421,9 +421,21 @@ const TYPED_SLOT: u32 = 100_000;
 const BLOBS: &str = "spblob";
 const SECRET_HANDLE: &str = "0000000000000000.handle";
 
-/// Where a user's blobs are.
+/// Where a user's blobs are. Android keeps them in the data partition's
+/// device-encrypted folder; some builds, and data partitions made by older
+/// systems, keep the same directory with the user's own files instead.
 fn blobs(user: u32) -> PathBuf {
-    Path::new(PROTECTORS).join(user.to_string()).join(BLOBS)
+    let standard = Path::new(PROTECTORS).join(user.to_string()).join(BLOBS);
+    if standard.is_dir() {
+        return standard;
+    }
+    for root in ["/data/system/users", "/data/system"] {
+        let older = Path::new(root).join(user.to_string()).join(BLOBS);
+        if older.is_dir() {
+            return older;
+        }
+    }
+    standard
 }
 
 /// Where a phone keeps the credential it made up itself for a user whose
