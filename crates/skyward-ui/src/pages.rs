@@ -594,6 +594,13 @@ const OS_VERSION: Text = ["OS 版本", "OS 版本", "OS version"];
 const MIUI_VERSION: Text = ["MIUI 版本", "MIUI 版本", "MIUI version"];
 const COLOROS_VERSION: Text = ["ColorOS 版本", "ColorOS 版本", "ColorOS version"];
 const FLYME_VERSION: Text = ["FlymeOS 版本", "FlymeOS 版本", "FlymeOS version"];
+const ORIGINOS_VERSION: Text = ["OriginOS 版本", "OriginOS 版本", "OriginOS version"];
+const REDMAGIC_VERSION: Text = ["REDMAGIC OS 版本", "REDMAGIC OS 版本", "REDMAGIC OS version"];
+const MYOS_VERSION: Text = ["MyOS 版本", "MyOS 版本", "MyOS version"];
+const NEBULA_VERSION: Text = ["星云AIOS 版本", "星雲AIOS 版本", "星云AIOS version"];
+const HARMONY_VERSION: Text = ["HarmonyOS 版本", "HarmonyOS 版本", "HarmonyOS version"];
+const HARMONY_NEXT_VERSION: Text = ["HarmonyOS NEXT 版本", "HarmonyOS NEXT 版本", "HarmonyOS NEXT version"];
+const MAGICOS_VERSION: Text = ["MagicOS 版本", "MagicOS 版本", "MagicOS version"];
 
 /// What the system's version is called on the pages: each maker names its
 /// own, and one not known keeps the generic name.
@@ -602,6 +609,13 @@ fn os_label(info: &DeviceInfo) -> Text {
         Some(OsName::Miui) => MIUI_VERSION,
         Some(OsName::ColorOs) => COLOROS_VERSION,
         Some(OsName::Flyme) => FLYME_VERSION,
+        Some(OsName::OriginOs) => ORIGINOS_VERSION,
+        Some(OsName::RedMagicOs) => REDMAGIC_VERSION,
+        Some(OsName::MyOs) => MYOS_VERSION,
+        Some(OsName::NebulaAios) => NEBULA_VERSION,
+        Some(OsName::HarmonyOs) => HARMONY_VERSION,
+        Some(OsName::HarmonyOsNext) => HARMONY_NEXT_VERSION,
+        Some(OsName::MagicOs) => MAGICOS_VERSION,
         Some(OsName::HyperOs) | None => OS_VERSION,
     }
 }
@@ -3937,6 +3951,13 @@ pub fn systems(cx: &Ctx) -> Frame {
                 Some(OsName::Miui) => "MIUI".to_string(),
                 Some(OsName::ColorOs) => "ColorOS".to_string(),
                 Some(OsName::Flyme) => "FlymeOS".to_string(),
+                Some(OsName::OriginOs) => "OriginOS".to_string(),
+                Some(OsName::RedMagicOs) => "REDMAGIC OS".to_string(),
+                Some(OsName::MyOs) => "MyOS".to_string(),
+                Some(OsName::NebulaAios) => "星云AIOS".to_string(),
+                Some(OsName::HarmonyOs) => "HarmonyOS".to_string(),
+                Some(OsName::HarmonyOsNext) => "HarmonyOS NEXT".to_string(),
+                Some(OsName::MagicOs) => "MagicOS".to_string(),
                 Some(OsName::HyperOs) => "HyperOS".to_string(),
                 None => l.pick(["系统", "系統", "System"]).to_string(),
             };
@@ -3958,6 +3979,13 @@ pub fn systems(cx: &Ctx) -> Frame {
         Some(OsName::Miui) => "MIUI".to_string(),
         Some(OsName::ColorOs) => "ColorOS".to_string(),
         Some(OsName::Flyme) => "FlymeOS".to_string(),
+        Some(OsName::OriginOs) => "OriginOS".to_string(),
+        Some(OsName::RedMagicOs) => "REDMAGIC OS".to_string(),
+        Some(OsName::MyOs) => "MyOS".to_string(),
+        Some(OsName::NebulaAios) => "星云AIOS".to_string(),
+        Some(OsName::HarmonyOs) => "HarmonyOS".to_string(),
+        Some(OsName::HarmonyOsNext) => "HarmonyOS NEXT".to_string(),
+        Some(OsName::MagicOs) => "MagicOS".to_string(),
         Some(OsName::HyperOs) | None => systems.installed.name.clone(),
     };
     let main_detail = i.os_version.as_deref().or(systems.installed.version.as_deref()).unwrap_or_default();

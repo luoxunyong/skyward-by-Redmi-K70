@@ -57,6 +57,13 @@ pub enum OsName {
     Miui,
     ColorOs,
     Flyme,
+    OriginOs,
+    RedMagicOs,
+    MyOs,
+    NebulaAios,
+    HarmonyOs,
+    HarmonyOsNext,
+    MagicOs,
 }
 
 /// `ro.build.version.security_patch`, a calendar date.
@@ -238,6 +245,41 @@ impl SystemProps {
         {
             return Some(OsName::Flyme);
         }
+        if self.get("ro.build.version.magic").is_some()
+            || self.get("ro.build.version.magicrom").is_some()
+            || self.get("ro.honor.os.version").is_some()
+            || self.any_key(|k| k.starts_with("ro.honor."))
+        {
+            return Some(OsName::MagicOs);
+        }
+        if self.get("ro.build.version.harmony").is_some()
+            || self.get("ro.build.version.harmonyos").is_some()
+            || self.get("hw_sc.build.platform.version").is_some()
+            || self.any_key(|k| k.contains("harmony"))
+        {
+            return Some(if self.harmony_is_next() { OsName::HarmonyOsNext } else { OsName::HarmonyOs });
+        }
+        if self.get("ro.vivo.os.name").is_some()
+            || self.get("ro.vivo.os.version").is_some()
+            || self.get("ro.vivo.os.build.display.id").is_some()
+            || self.any_key(|k| k.starts_with("ro.vivo.") || k.starts_with("ro.iqoo."))
+        {
+            return Some(OsName::OriginOs);
+        }
+        if self.get("ro.build.nubia.rom.name").is_some()
+            || self.get("ro.nubia.rom.version").is_some()
+            || self.get("ro.build.nubia.rom.version").is_some()
+            || self.any_key(|k| k.starts_with("ro.nubia."))
+        {
+            let rom = self.get("ro.build.nubia.rom.name").unwrap_or_default().to_ascii_lowercase();
+            return Some(if rom.contains("myos") { OsName::MyOs } else { OsName::RedMagicOs });
+        }
+        if self.get("ro.nebula.os.version").is_some()
+            || self.get("ro.build.version.nebula").is_some()
+            || self.any_key(|k| k.contains("nebula"))
+        {
+            return Some(OsName::NebulaAios);
+        }
         if self.get("ro.mi.os.version.incremental").is_some()
             || self.get("ro.mi.os.version.name").is_some()
             || self.get("ro.mi.os.version.code").is_some()
@@ -253,7 +295,21 @@ impl SystemProps {
         }
         let display = self.get("ro.build.display.id").or_else(|| self.get("ro.build.description")).unwrap_or_default();
         let display = display.to_ascii_lowercase();
-        if display.contains("coloros") {
+        if display.contains("harmonyos next") || display.contains("harmonyosnext") {
+            Some(OsName::HarmonyOsNext)
+        } else if display.contains("harmonyos") {
+            Some(OsName::HarmonyOs)
+        } else if display.contains("magicos") {
+            Some(OsName::MagicOs)
+        } else if display.contains("originos") {
+            Some(OsName::OriginOs)
+        } else if display.contains("redmagic") {
+            Some(OsName::RedMagicOs)
+        } else if display.contains("myos") {
+            Some(OsName::MyOs)
+        } else if display.contains("星云") || display.contains("nebula") {
+            Some(OsName::NebulaAios)
+        } else if display.contains("coloros") {
             Some(OsName::ColorOs)
         } else if display.contains("flyme") {
             Some(OsName::Flyme)
@@ -264,6 +320,20 @@ impl SystemProps {
         } else {
             None
         }
+    }
+
+    /// Whether the HarmonyOS build is the one from 5 on, which Huawei calls
+    /// HarmonyOS NEXT: its version starts at 5, or its name says NEXT.
+    fn harmony_is_next(&self) -> bool {
+        let display = self.get("ro.build.display.id").or_else(|| self.get("ro.build.description")).unwrap_or_default();
+        if display.to_ascii_lowercase().contains("next") {
+            return true;
+        }
+        self.get("ro.build.version.harmony")
+            .or_else(|| self.get("ro.build.version.harmonyos"))
+            .or_else(|| self.get("hw_sc.build.platform.version"))
+            .and_then(|v| v.split(|c: char| !c.is_ascii_digit()).find(|s| !s.is_empty()).and_then(|n| n.parse::<u32>().ok()))
+            .is_some_and(|major| major >= 5)
     }
 
     /// The version as the maker names it for `name`, or the configured
@@ -286,6 +356,23 @@ impl SystemProps {
                 .or_else(|| self.get("ro.mi.os.version.incremental"))
                 .or_else(|| self.get("ro.mi.os.version.name"))
                 .or_else(|| self.get("ro.mi.os.version.code")),
+            Some(OsName::OriginOs) => self
+                .get("ro.vivo.os.version")
+                .or_else(|| self.get("ro.vivo.os.build.display.id"))
+                .or_else(|| self.get("ro.vivo.os.name")),
+            Some(OsName::RedMagicOs) | Some(OsName::MyOs) => self
+                .get("ro.nubia.rom.version")
+                .or_else(|| self.get("ro.build.nubia.rom.version"))
+                .or_else(|| self.get("ro.build.nubia.rom.name")),
+            Some(OsName::NebulaAios) => self.get("ro.nebula.os.version").or_else(|| self.get("ro.build.version.nebula")),
+            Some(OsName::HarmonyOs) | Some(OsName::HarmonyOsNext) => self
+                .get("ro.build.version.harmony")
+                .or_else(|| self.get("ro.build.version.harmonyos"))
+                .or_else(|| self.get("hw_sc.build.platform.version")),
+            Some(OsName::MagicOs) => self
+                .get("ro.build.version.magic")
+                .or_else(|| self.get("ro.build.version.magicrom"))
+                .or_else(|| self.get("ro.honor.os.version")),
             None => self.get(configured),
         };
         version.or_else(|| self.get("ro.build.display.id")).or_else(|| self.get("ro.build.version.incremental"))
@@ -571,6 +658,14 @@ mod tests {
         assert_eq!(props(&[("ro.miui.ui.version.name", "V14.0.5.0")]).os_name(), Some(OsName::Miui));
         assert_eq!(props(&[("ro.build.version.oplusrom", "V15.0.0")]).os_name(), Some(OsName::ColorOs));
         assert_eq!(props(&[("ro.build.flyme.version", "Flyme 10")]).os_name(), Some(OsName::Flyme));
+        assert_eq!(props(&[("ro.vivo.os.name", "OriginOS 5")]).os_name(), Some(OsName::OriginOs));
+        assert_eq!(props(&[("ro.build.nubia.rom.name", "REDMAGIC OS 10.0")]).os_name(), Some(OsName::RedMagicOs));
+        assert_eq!(props(&[("ro.build.nubia.rom.name", "MyOS 14")]).os_name(), Some(OsName::MyOs));
+        assert_eq!(props(&[("ro.build.display.id", "星云AIOS 1.0")]).os_name(), Some(OsName::NebulaAios));
+        assert_eq!(props(&[("ro.build.version.harmony", "4.2.0")]).os_name(), Some(OsName::HarmonyOs));
+        assert_eq!(props(&[("ro.build.version.harmony", "5.0.0")]).os_name(), Some(OsName::HarmonyOsNext));
+        assert_eq!(props(&[("ro.build.version.harmony", "7.0.0")]).os_name(), Some(OsName::HarmonyOsNext));
+        assert_eq!(props(&[("ro.build.version.magic", "9.0.0")]).os_name(), Some(OsName::MagicOs));
         assert_eq!(
             props(&[("ro.mi.os.version.incremental", "OS3.0.1"), ("ro.build.version.oplusrom", "V15.0.0")]).os_name(),
             Some(OsName::ColorOs),
@@ -623,6 +718,15 @@ mod tests {
             port.os_version("ro.mi.os.version.incremental", Some(OsName::HyperOs)).as_deref(),
             Some("OS2.0.215.0.VNKCNXM")
         );
+
+        let port = props(&[("ro.vivo.os.version", "5.0.0")]);
+        assert_eq!(port.os_version("x", Some(OsName::OriginOs)).as_deref(), Some("5.0.0"));
+        let port = props(&[("ro.nubia.rom.version", "10.0.0")]);
+        assert_eq!(port.os_version("x", Some(OsName::RedMagicOs)).as_deref(), Some("10.0.0"));
+        let port = props(&[("ro.build.version.harmony", "5.0.0")]);
+        assert_eq!(port.os_version("x", Some(OsName::HarmonyOsNext)).as_deref(), Some("5.0.0"));
+        let port = props(&[("ro.build.version.magic", "9.0.0")]);
+        assert_eq!(port.os_version("x", Some(OsName::MagicOs)).as_deref(), Some("9.0.0"));
 
         // A system that names no version at all still shows what it calls itself.
         let port = props(&[("ro.build.display.id", "Unknown 1.0")]);
