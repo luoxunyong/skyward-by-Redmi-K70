@@ -492,9 +492,18 @@ pub fn release_whole(slot: Slot) -> Result<()> {
             // asks for: the package's own unmapping then finds it gone.
             match skyward_block::dm::remove_deferred(&p.name) {
                 Ok(()) => {
+                    let mut gone = false;
+                    for _ in 0..100 {
+                        if skyward_block::dm::status(&p.name).ok().flatten().is_none() {
+                            gone = true;
+                            break;
+                        }
+                        std::thread::sleep(std::time::Duration::from_millis(50));
+                    }
                     let _ = skyward_sys::kmsg(&format!(
-                        "install: device-mapper device {} is taken away once its last holder lets go",
-                        p.name
+                        "install: device-mapper device {} {}",
+                        p.name,
+                        if gone { "was taken away as its last holder let go" } else { "is waiting for its last holder to let go" }
                     ));
                 }
                 Err(deferred) => {
@@ -533,7 +542,7 @@ fn unmap_for_good(name: &str, point: &Path) -> Result<()> {
         Ok(()) => return Ok(()),
         Err(e) => e,
     };
-    for _ in 0..20 {
+    for _ in 0..100 {
         std::thread::sleep(std::time::Duration::from_millis(50));
         match unmap(name, point) {
             Ok(()) => return Ok(()),

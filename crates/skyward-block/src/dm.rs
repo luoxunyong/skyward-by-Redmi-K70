@@ -84,8 +84,9 @@ const DM_UUID_LEN: usize = 129;
 const DM_MAX_TYPE_NAME: usize = 16;
 const DM_READONLY_FLAG: u32 = 1 << 0;
 /// The device is taken away once its last holder lets go, rather than
-/// refused while one holds it.
-const DM_DEFERRED_REMOVE: u32 = 1 << 1;
+/// refused while one holds it. In <linux/dm-ioctl.h> this is bit 17;
+/// bit 1 is DM_SUSPEND_FLAG and is not what a removal asks for.
+const DM_DEFERRED_REMOVE: u32 = 1 << 17;
 /// Asks DM_TABLE_STATUS for each target's parameters rather than its
 /// status.
 const DM_STATUS_TABLE_FLAG: u32 = 1 << 4;
@@ -473,6 +474,7 @@ mod tests {
     fn request_codes_match_the_kernel_header() {
         assert_eq!(DM_DEV_CREATE, 0xc138_fd03);
         assert_eq!(DM_TABLE_LOAD, 0xc138_fd09);
+        assert_eq!(DM_DEFERRED_REMOVE, 1 << 17);
     }
 
     #[test]
