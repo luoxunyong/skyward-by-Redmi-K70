@@ -98,6 +98,9 @@ pub enum Screen {
     /// Skyward's newest release, and updating to it: its build for the
     /// phone downloaded and written into the recovery partitions.
     SkywardUpdate,
+    /// The GitHub and mirror sources a new build of Skyward comes from,
+    /// and how fast each answers.
+    SkywardSources,
     /// Skyward's own licence.
     License,
     /// The interface typeface and the terms it is used under.
@@ -2190,6 +2193,7 @@ impl State {
         match screen {
             Screen::Wlan => self.wlan.is_some(),
             Screen::SkywardUpdate => self.wlan.is_some() && self.recovery_partitions,
+            Screen::SkywardSources => self.wlan.is_some(),
             Screen::Systems => self.dual_boot,
             _ => true,
         }
@@ -3984,7 +3988,7 @@ impl App {
             return;
         }
         self.state.wlan = Some(w);
-        if matches!(self.screen(), Screen::Home | Screen::Wlan | Screen::WlanNetwork | Screen::Update | Screen::SkywardUpdate) {
+        if matches!(self.screen(), Screen::Home | Screen::Wlan | Screen::WlanNetwork | Screen::Update | Screen::SkywardUpdate | Screen::SkywardSources) {
             self.refresh();
         }
         // The status bar shows the network joined over every page.
@@ -4069,7 +4073,7 @@ impl App {
             Ok(newest) => SkywardCheck::Answered(newest),
             Err(why) => SkywardCheck::Failed(why),
         };
-        if matches!(self.screen(), Screen::Settings | Screen::SkywardUpdate) {
+        if matches!(self.screen(), Screen::Settings | Screen::SkywardUpdate | Screen::SkywardSources) {
             self.refresh();
         }
     }
@@ -4088,7 +4092,7 @@ impl App {
     /// The GitHub and mirror sources timed for the update, fastest first.
     pub fn skyward_sources(&mut self, sources: Vec<(String, Option<u64>)>) {
         self.state.skyward_sources = Some(sources);
-        if self.screen() == Screen::SkywardUpdate {
+        if matches!(self.screen(), Screen::SkywardUpdate | Screen::SkywardSources) {
             self.refresh();
         }
     }
@@ -5548,6 +5552,13 @@ impl App {
                     fx.push(Effect::CheckUpdate);
                 }
                 fx
+            }
+            // The mirrors page times the sources as it opens, whether or
+            // not the release check has an answer already.
+            Screen::SkywardSources if self.state.online() && (matches!(self.state.skyward_check, SkywardCheck::Idle | SkywardCheck::Failed(_)) || self.state.skyward_sources.is_none()) => {
+                self.state.skyward_check = SkywardCheck::Asking;
+                self.state.skyward_sources = None;
+                vec![Effect::CheckSkyward]
             }
             // Skyward's own page asks GitHub the same way.
             Screen::SkywardUpdate if matches!(self.state.skyward_check, SkywardCheck::Idle | SkywardCheck::Failed(_)) && self.state.online() => {
@@ -7813,6 +7824,7 @@ mod tests {
             Screen::Logs,
             Screen::Update,
             Screen::SkywardUpdate,
+            Screen::SkywardSources,
             Screen::License,
             Screen::FontLicense,
             Screen::Slot,
@@ -11819,8 +11831,19 @@ mod tests {
         app.state.wlan = Some(connected("Skyward"));
         app.state.recovery_partitions = true;
         app.refresh();
-        let opens = app.frame(&f, &i).hits.iter().filter(|h| h.action == Action::Open(Screen::SkywardUpdate)).count();
-        assert_eq!(opens, 2, "Skyward update and GitHub mirrors");
+        let update = app.frame(&f, &i).hits.iter().filter(|h| h.action == Action::Open(Screen::SkywardUpdate)).count();
+        let mirrors = app.frame(&f, &i).hits.iter().filter(|h| h.action == Action::Open(Screen::SkywardSources)).count();
+        assert_eq!((update, mirrors), (1, 1), "Skyward update and GitHub mirrors, each its own page");
+    }
+
+    #[test]
+    fn the_github_mirrors_page_times_the_sources_on_its_own() {
+        let (f, i) = (fonts(), info());
+        let mut app = App::new(Screen::Settings, W, H, PPD);
+        app.state.wlan = Some(connected("Skyward"));
+        app.refresh();
+        assert_eq!(tap(&mut app, &f, &i, Action::Open(Screen::SkywardSources)), vec![Effect::CheckSkyward]);
+        assert_eq!(app.screen(), Screen::SkywardSources);
     }
 
     #[test]

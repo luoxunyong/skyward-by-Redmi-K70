@@ -97,6 +97,7 @@ pub fn render(screen: Screen, cx: &Ctx) -> Frame {
         Screen::Logs => logs(cx),
         Screen::Update => update(cx),
         Screen::SkywardUpdate => skyward_update(cx),
+        Screen::SkywardSources => skyward_sources(cx),
         Screen::License => license(cx),
         Screen::FontLicense => font_license(cx),
         Screen::Slot => slot(cx),
@@ -174,6 +175,7 @@ const REFRESH_RATE: Text = ["刷新率", "螢幕更新率", "Refresh rate"];
 const HOUR_FORMAT: Text = ["24 小时制", "24 小時制", "24-hour clock"];
 const UPDATE: Text = ["系统更新", "系統更新", "System update"];
 const SKYWARD_UPDATE: Text = ["Skyward 更新", "Skyward 更新", "Skyward update"];
+const SKYWARD_MIRRORS: Text = ["GitHub 镜像源", "GitHub 鏡像來源", "GitHub mirrors"];
 const FILES: Text = ["文件管理", "檔案管理", "File manager"];
 const TERMINAL: Text = ["终端", "終端機", "Terminal"];
 const LANGUAGE: Text = ["语言", "語言", "Language"];
@@ -431,12 +433,14 @@ pub fn settings(cx: &Ctx) -> Frame {
             None => row,
         });
         opens.push(Action::Open(Screen::SkywardUpdate));
-        let row = Row::new(l.pick(["GitHub 镜像源", "GitHub 鏡像來源", "GitHub mirrors"]));
+    }
+    if s.offers(Screen::SkywardSources) {
+        let row = Row::new(l.pick(SKYWARD_MIRRORS));
         rows.push(match &mirror_value {
             Some(value) => row.trail(Trail::Value(value.as_str())),
             None => row,
         });
-        opens.push(Action::Open(Screen::SkywardUpdate));
+        opens.push(Action::Open(Screen::SkywardSources));
     }
     let about = widgets::list(&mut c, t, f, y, &rows);
     out.extend(hits(&about.rows, &opens));
@@ -3018,29 +3022,7 @@ pub fn skyward_update(cx: &Ctx) -> Frame {
     let y = widgets::section_first(&mut c, t, f, top, l.pick(["本机", "本機", "This phone"]));
     let y = widgets::info_card(&mut c, t, f, y, &[(l.pick(["当前版本", "目前版本", "Current version"]), VERSION.to_string())]);
     let y = widgets::section(&mut c, t, f, y, l.pick(["在线更新", "線上更新", "Online update"]));
-    let y = match &cx.state.skyward_sources {
-        Some(sources) if !sources.is_empty() => {
-            let y = widgets::section(&mut c, t, f, y, l.pick(["GitHub 镜像源", "GitHub 鏡像來源", "GitHub mirrors"]));
-            let took: Vec<String> = sources
-                .iter()
-                .map(|(_, ms)| match ms {
-                    Some(ms) => format!("{ms} ms"),
-                    None => l.pick(["超时", "逾時", "Timed out"]).to_string(),
-                })
-                .collect();
-            let rows: Vec<Row> = sources
-                .iter()
-                .zip(&took)
-                .enumerate()
-                .map(|(i, ((name, _), took))| Row::new(name).subtitle(took).trail(Trail::Check(i == 0)))
-                .collect();
-            let list = widgets::list(&mut c, t, f, y, &rows);
-            let again = widgets::list(&mut c, t, f, list.bottom + t.m.dp(8.0), &[Row::new(l.pick(["重新测速", "重新測速", "Time again"]))]);
-            out.extend(hits(&again.rows, &[Action::CheckSkyward]));
-            again.bottom
-        }
-        _ => y,
-    };
+    let y = skyward_source_section(&mut c, cx, y, &mut out);
     let y = skyward_online(&mut c, cx, y, &mut out);
     let points = [
         l.pick([
@@ -3062,6 +3044,85 @@ pub fn skyward_update(cx: &Ctx) -> Frame {
     ];
     let y = widgets::notes(&mut c, t, f, y + t.m.card_gap, l.pick(NOTES), &points);
     Frame::new(t, fit(c, t, y), out, l.pick(SKYWARD_UPDATE), top)
+}
+
+/// The GitHub and mirror sources of Skyward's update, fastest first, and a
+/// row that times them again. `y` where nothing has been timed yet.
+fn skyward_source_section(c: &mut Canvas, cx: &Ctx, y: f32, out: &mut Vec<Hit>) -> f32 {
+    let (t, f, l) = (cx.t, cx.f, cx.state.lang);
+    let Some(sources) = cx.state.skyward_sources.as_ref().filter(|sources| !sources.is_empty()) else { return y };
+    let y = widgets::section(c, t, f, y, l.pick(SKYWARD_MIRRORS));
+    let took: Vec<String> = sources
+        .iter()
+        .map(|(_, ms)| match ms {
+            Some(ms) => format!("{ms} ms"),
+            None => l.pick(["超时", "逾時", "Timed out"]).to_string(),
+        })
+        .collect();
+    let rows: Vec<Row> = sources
+        .iter()
+        .zip(&took)
+        .enumerate()
+        .map(|(i, ((name, _), took))| Row::new(name).subtitle(took).trail(Trail::Check(i == 0)))
+        .collect();
+    let list = widgets::list(c, t, f, y, &rows);
+    let again = widgets::list(c, t, f, list.bottom + t.m.dp(8.0), &[Row::new(l.pick(["重新测速", "重新測速", "Time again"]))]);
+    out.extend(hits(&again.rows, &[Action::CheckSkyward]));
+    again.bottom
+}
+
+/// The GitHub and mirror sources of Skyward's update, timed: where a new
+/// build would come from, and how fast each source answers.
+pub fn skyward_sources(cx: &Ctx) -> Frame {
+    let (t, f, s, l) = (cx.t, cx.f, cx.state, cx.state.lang);
+    let mut c = long_page(cx);
+    let top = t.m.content_top;
+    let mut out = Vec::new();
+    let y = widgets::section_first(&mut c, t, f, top, l.pick(["Skyward 更新源", "Skyward 更新來源", "Skyward sources"]));
+    let latest = match &s.skyward_check {
+        SkywardCheck::Asking => l.pick(["正在检查并测速", "正在檢查並測速", "Checking and timing"]).to_string(),
+        SkywardCheck::Answered(n) => {
+            let version = &n.version;
+            tr!(l, "最新版本 {version}", "最新版本 {version}", "Newest {version}")
+        }
+        SkywardCheck::Failed(_) => l.pick(["检查失败，仍可测速", "檢查失敗，仍可測速", "The check failed; the sources can still be timed"]).to_string(),
+        SkywardCheck::Idle => l.pick(["尚未检查", "尚未檢查", "Not checked yet"]).to_string(),
+    };
+    let y = widgets::info_card(
+        &mut c,
+        t,
+        f,
+        y,
+        &[
+            (l.pick(["当前版本", "目前版本", "Current version"]), VERSION.to_string()),
+            (l.pick(["最新版本", "最新版本", "Newest version"]), latest),
+        ],
+    );
+    let y = match &s.skyward_check {
+        SkywardCheck::Failed(why) => widgets::footnote(&mut c, t, f, y, &fmt::unanswered(l, why)),
+        _ => y,
+    };
+    let y = skyward_source_section(&mut c, cx, y, &mut out);
+    let y = if s.skyward_sources.as_ref().is_none_or(|sources| sources.is_empty()) {
+        let mut row = Row::new(l.pick(["测速", "測速", "Time the sources"]));
+        if !s.online() {
+            row = row.subtitle(l.pick(WLAN_FIRST));
+        }
+        let list = widgets::list(&mut c, t, f, y + t.m.card_gap, &[row]);
+        out.extend(hits(&list.rows, &[Action::CheckSkyward]));
+        list.bottom
+    } else {
+        y
+    };
+    let open = widgets::list(&mut c, t, f, y + t.m.card_gap, &[Row::new(l.pick(SKYWARD_UPDATE))]);
+    out.extend(hits(&open.rows, &[Action::Open(Screen::SkywardUpdate)]));
+    let note = l.pick([
+        "这些是 Skyward 新版本的下载源，测速只用于选择最快的源，不会下载或改动任何分区。",
+        "這些是 Skyward 新版本的下載來源，測速只用於選擇最快的來源，不會下載或改動任何分割區。",
+        "These are where a new Skyward build is downloaded from. Timing them chooses the fastest; nothing is downloaded or written.",
+    ]);
+    let y = widgets::footnote(&mut c, t, f, open.bottom, note);
+    Frame::new(t, fit(c, t, y), out, l.pick(SKYWARD_MIRRORS), top)
 }
 
 /// Asking GitHub for Skyward's newest release, then updating to it: its

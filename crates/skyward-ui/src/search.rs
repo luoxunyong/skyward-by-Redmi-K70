@@ -116,7 +116,7 @@ pub const ENTRIES: &[Entry] = &[
     entry(
         ["GitHub 镜像源", "GitHub 鏡像來源", "GitHub mirrors"],
         SKYWARD,
-        Screen::SkywardUpdate,
+        Screen::SkywardSources,
         &["githubjingxiang", "githubjx", "jingxiang", "jx", "mirror", "mirrors", "suyuan", "source", "latency", "yanshi", "ys"],
     ),
     entry(
