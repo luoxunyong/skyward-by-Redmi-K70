@@ -4,7 +4,6 @@
 //! what it opens holds every file, with the names and contents of the ones
 //! that are a user's own still encrypted.
 
-use crate::encryption::{key_dir, target, Encryption};
 use crate::gatekeeper::Gatekeeper;
 use crate::keymint::KeyMint;
 use crate::keystore::{StoredKey, Unwrap};
@@ -13,6 +12,7 @@ use crate::user::Bound;
 use crate::weaver::Weaver;
 use anyhow::{Context, Result};
 use skyward_binder::driver::Binder;
+use skyward_block::dm::Target;
 use skyward_block::fsck::Checked;
 use skyward_block::fstab::Entry;
 use skyward_block::{dm, mount};
@@ -31,6 +31,43 @@ pub const SDCARD: &str = "/sdcard";
 
 /// The phone's owner, the first of its users.
 const OWNER: u32 = 0;
+
+/// The key is in a directory of this name under the one the phone names.
+const KEY_DIR: &str = "key";
+
+/// How the kernel knows the cipher a phone names.
+const CIPHERS: [(&str, &str); 2] = [("aes-256-xts", "aes-xts-plain64"), ("adiantum", "xchacha12,aes-adiantum-plain64")];
+
+/// The hardware reads and writes in 4096-byte units, so the partition is
+/// mapped in whole multiples of eight 512-byte sectors.
+const SECTORS_PER_UNIT: u64 = 8;
+
+/// How a phone says its data partition is encrypted: the cipher, and
+/// whether the key is one only the storage hardware can unwrap.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Encryption {
+    pub cipher: String,
+    pub wrapped: bool,
+}
+
+impl Encryption {
+    /// Read what an entry of the phone's own table says.
+    pub fn of(entry: &Entry) -> Result<Encryption> {
+        let said = entry.extra("metadata_encryption").context("the phone says its data partition is not encrypted whole")?;
+        let (name, rest) = said.split_once(':').unwrap_or((said, ""));
+        let cipher = CIPHERS
+            .iter()
+            .find_map(|(theirs, kernels)| (*theirs == name).then_some(*kernels))
+            .with_context(|| format!("no cipher here is the {name} the phone names"))?;
+        Ok(Encryption { cipher: cipher.to_string(), wrapped: rest == "wrappedkey_v0" })
+    }
+}
+
+/// Where the phone keeps the key for the filesystem an entry describes.
+pub fn key_dir(entry: &Entry) -> Result<PathBuf> {
+    let dir = entry.extra("keydirectory").context("the phone says where the key for its data partition is not")?;
+    Ok(Path::new(dir).join(KEY_DIR))
+}
 
 /// Unwrap the key the phone keeps for its data partition and give the
 /// storage hardware the form of it that lasts until the phone is started
@@ -84,11 +121,23 @@ fn open(service: &KeyMint) -> Result<Opened> {
     })();
     match mounted {
         Ok((checked, filesystem)) => Ok(Opened { mapped, filesystem, checked }),
-        Err(e) => match dm::remove(MAPPED) {
-            Ok(()) => Err(e),
-            Err(r) => Err(e.context(format!("removing {MAPPED} afterwards failed too: {r:#}"))),
+        Err(e) => match dm::status(MAPPED)? {
+            Some(_) => match dm::remove(MAPPED) {
+                Ok(()) => Err(e),
+                Err(r) => Err(e.context(format!("removing {MAPPED} afterwards failed too: {r:#}"))),
+            },
+            None => Err(e),
         },
     }
+}
+
+/// Whether the start of the raw data partition is all zeros: a factory
+/// reset discarded it, and no filesystem has been made since.
+fn zeroed(device: &str) -> bool {
+    use std::io::Read;
+    let Ok(mut file) = std::fs::File::open(device) else { return false };
+    let mut head = vec![0u8; 1 << 20];
+    file.read_exact(&mut head).is_ok_and(|()| head.iter().all(|b| *b == 0))
 }
 
 /// Map the data partition decrypted, under the key the phone keeps for it,
@@ -96,12 +145,37 @@ fn open(service: &KeyMint) -> Result<Opened> {
 /// and the device the filesystem is read and written through.
 fn map(service: &KeyMint) -> Result<(Vec<Entry>, PathBuf)> {
     let entries = skyward_block::fstab::read(MOUNT)?;
-    let entry = entries.first().with_context(|| format!("the phone's own table says nothing about {MOUNT}"))?;
-    let encryption = Encryption::of(entry)?;
+    let first = entries.first().with_context(|| format!("the phone's own table says nothing about {MOUNT}"))?;
+    let first_device = skyward_block::fstab::device(first)?;
+    // The table may name the partition once per filesystem it might hold,
+    // and a decryption package may leave the partition unencrypted. What
+    // the raw partition holds says which entry is the one; an entry
+    // without metadata_encryption is mounted as it is, with no key asked
+    // for and no device-mapper over it.
+    let mut holds = skyward_block::probe::filesystem(Path::new(&first_device)).ok().flatten();
+    // A data partition a factory reset discarded has no filesystem and no
+    // metadata key: make the empty filesystem the table names here, so the
+    // recovery can use it before the system next starts.
+    if holds.is_none() && zeroed(&first_device) {
+        skyward_block::erase::make(Path::new(&first_device), &first.filesystem, &first.extras, false)
+            .context("make the data partition afresh")?;
+        holds = skyward_block::probe::filesystem(Path::new(&first_device)).ok().flatten();
+    }
+    let entry = entries.iter().find(|e| holds.as_deref() == Some(e.filesystem.as_str())).unwrap_or(first);
     let device = skyward_block::fstab::device(entry)?;
-    let key = storage_key(service, entry, &encryption)?;
-    let sectors = skyward_block::size_bytes(&device)? / 512;
-    let mapped = dm::create(MAPPED, &[target(&device, sectors, &key, &encryption)], false)?;
+    // A partition the system has not encrypted yet, as just after a
+    // format, already holds its filesystem on the raw device. There is no
+    // metadata key to unwrap then; mount what is there.
+    let raw = holds.as_deref() == Some(entry.filesystem.as_str());
+    let mapped = match (raw, entry.extra("metadata_encryption")) {
+        (true, _) | (false, None) => PathBuf::from(device),
+        (false, Some(_)) => {
+            let encryption = Encryption::of(entry)?;
+            let key = storage_key(service, entry, &encryption)?;
+            let sectors = skyward_block::size_bytes(&device)? / 512;
+            dm::create(MAPPED, &[target(&device, sectors, &key, &encryption)], false)?
+        }
+    };
     Ok((entries, mapped))
 }
 
@@ -115,7 +189,10 @@ pub fn map_unmounted(service: &KeyMint) -> Result<PathBuf> {
 
 /// Take away the mapping [`map_unmounted`] made.
 pub fn unmap() -> Result<()> {
-    dm::remove(MAPPED)
+    match dm::status(MAPPED)? {
+        Some(_) => dm::remove(MAPPED),
+        None => Ok(()),
+    }
 }
 
 /// Show the owner's shared storage at /sdcard; shown already, it stays.
@@ -124,7 +201,13 @@ fn show_owner_storage() -> Result<()> {
     if mount::is_mount_point(at)? {
         return Ok(());
     }
-    mount::bind(&Path::new(SHARED_STORAGE).join(OWNER.to_string()), at)
+    let from = Path::new(SHARED_STORAGE).join(OWNER.to_string());
+    // A partition formatted and not yet started by the system has no
+    // shared storage to show yet.
+    if !from.is_dir() {
+        return Ok(());
+    }
+    mount::bind(&from, at)
 }
 
 /// Close what opening the partition opened, where the recovery opened it:
@@ -172,11 +255,24 @@ pub fn open_without_credential(service: &KeyMint) -> Result<Opening> {
         true => None,
         false => Some(open(service)?),
     };
-    open_shared(service)?;
+    // A data partition formatted and not yet started by the system has no
+    // shared key and no user keys. Nothing there is encrypted; open it as
+    // it is rather than asking for keys that were never made.
+    let fresh = fresh();
+    if !fresh {
+        open_shared(service)?;
+    }
     let mut closed = Vec::new();
     let mut owner = Note::default();
-    for user in open_users(service)? {
-        let protector = protector(user)?;
+    let users = if fresh { Vec::new() } else { open_users(service)? };
+    for user in users {
+        let Some(protector) = protector(user)? else {
+            let note = open_user_files(service, user, None, None)?;
+            if user == OWNER {
+                owner = note;
+            }
+            continue;
+        };
         match protector.lock {
             None => {
                 let note = open_user_files(service, user, None, None)?;
@@ -270,6 +366,12 @@ fn users() -> Result<Vec<u32>> {
     Ok(users)
 }
 
+/// Whether the data partition has no encryption keys yet: it was
+/// formatted and the installed system has not made them.
+fn fresh() -> bool {
+    !Path::new(FILE_MODE).exists() && !Path::new(USER_KEYS).join("de").exists()
+}
+
 /// Let in the keys for the files of each user that are readable before
 /// that user signs in, and give the users they belong to.
 fn open_users(service: &KeyMint) -> Result<Vec<u32>> {
@@ -295,18 +397,30 @@ const PROTECTORS: &str = "/data/system_de";
 /// credential before can still be used. Which of them the user's current
 /// credential opens is the phone's own business, and it writes that down,
 /// so this reads it rather than guess.
-fn protector(user: u32) -> Result<crate::user::Protector> {
+fn protector(user: u32) -> Result<Option<crate::user::Protector>> {
+    let recorded = crate::locksettings::current_protector(Path::new(crate::locksettings::DATABASE), user)?;
     let dir = blobs(user);
     let mut ids = Vec::new();
-    for entry in std::fs::read_dir(&dir).with_context(|| format!("read {}", dir.display()))? {
-        let path = entry.with_context(|| format!("read {}", dir.display()))?.path();
-        if path.extension().is_some_and(|e| e == "spblob")
-            && let Some(id) = path.file_stem().and_then(|s| s.to_str())
-        {
-            ids.push(id.to_string());
+    if dir.is_dir() {
+        for entry in std::fs::read_dir(&dir).with_context(|| format!("read {}", dir.display()))? {
+            let path = entry.with_context(|| format!("read {}", dir.display()))?.path();
+            if path.extension().is_some_and(|e| e == "spblob") {
+                if let Some(id) = path.file_stem().and_then(|s| s.to_str()) {
+                    ids.push(id.to_string());
+                }
+            }
         }
     }
-    let id = match crate::locksettings::current_protector(Path::new(crate::locksettings::DATABASE), user)? {
+    // No blob at all: the user set no screen lock, or this system is new
+    // and has made none yet. A lock the phone records but whose blob is
+    // not there is told of rather than taken for no lock.
+    if ids.is_empty() {
+        if recorded.is_some() {
+            anyhow::bail!("the phone records user {user}'s screen lock, but {} holds no blob for it", dir.display());
+        }
+        return Ok(None);
+    }
+    let id = match recorded {
         Some(recorded) => {
             anyhow::ensure!(
                 ids.contains(&recorded),
@@ -345,12 +459,12 @@ fn protector(user: u32) -> Result<crate::user::Protector> {
             std::fs::read(dir.join(format!("{id}.secdis"))).with_context(|| format!("read what the blob in {} is bound to", dir.display()))?,
         ),
     };
-    Ok(crate::user::Protector {
+    Ok(Some(crate::user::Protector {
         blob: std::fs::read(dir.join(format!("{id}.spblob"))).with_context(|| format!("read the blob in {}", dir.display()))?,
         bound,
         id,
         lock,
-    })
+    }))
 }
 
 /// Which of the secure world's slots a user's enrolments sit in. What the
@@ -365,9 +479,21 @@ const TYPED_SLOT: u32 = 100_000;
 const BLOBS: &str = "spblob";
 const SECRET_HANDLE: &str = "0000000000000000.handle";
 
-/// Where a user's blobs are.
+/// Where a user's blobs are. Android keeps them in the data partition's
+/// device-encrypted folder; some builds, and data partitions made by older
+/// systems, keep the same directory with the user's own files instead.
 fn blobs(user: u32) -> PathBuf {
-    Path::new(PROTECTORS).join(user.to_string()).join(BLOBS)
+    let standard = Path::new(PROTECTORS).join(user.to_string()).join(BLOBS);
+    if standard.is_dir() {
+        return standard;
+    }
+    for root in ["/data/system/users", "/data/system"] {
+        let older = Path::new(root).join(user.to_string()).join(BLOBS);
+        if older.is_dir() {
+            return older;
+        }
+    }
+    standard
 }
 
 /// Where a phone keeps the credential it made up itself for a user whose
@@ -430,7 +556,16 @@ const TAG_BYTES: usize = 16;
 /// owner's own secret gave. The owner's files open, their shared storage
 /// shows at /sdcard.
 fn open_user_files(service: &KeyMint, user: u32, credential: Option<&[u8]>, owner: Option<&Token>) -> Result<Note> {
-    let protector = protector(user)?;
+    let Some(protector) = protector(user)? else {
+        // No synthetic password: the user set no screen lock, and there is
+        // nothing for a credential to answer or to open behind one. Their
+        // files are open all the same, and the owner's shared storage is
+        // theirs to see.
+        if user == OWNER {
+            show_owner_storage()?;
+        }
+        return Ok(Note::default());
+    };
     let stretched = match &protector.lock {
         Some(lock) => {
             let typed = match made_up_credential(service, user, &protector.id, owner)? {
@@ -525,4 +660,64 @@ fn secret_note(user: u32, synthetic_password: &[u8]) -> Result<Note> {
         Ok(token) => Note { token: Some(token), refused: None },
         Err(e) => Note { token: None, refused: Some(format!("{e:#}")) },
     })
+}
+
+/// Build the device-mapper target that reads the partition through the
+/// storage hardware's decryption.
+pub fn target(device: &str, sectors: u64, key: &[u8], encryption: &Encryption) -> Target {
+    Target::DefaultKey {
+        sectors: sectors - sectors % SECTORS_PER_UNIT,
+        device: device.to_string(),
+        cipher: encryption.cipher.clone(),
+        key: key.iter().map(|b| format!("{b:02x}")).collect(),
+        wrapped: encryption.wrapped,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn entry(extras: &str) -> Entry {
+        Entry {
+            device: "/dev/block/bootdevice/by-name/userdata".into(),
+            mount_point: MOUNT.into(),
+            filesystem: "f2fs".into(),
+            options: vec!["noatime".into(), "inlinecrypt".into()],
+            extras: extras.split(',').map(str::to_string).collect(),
+        }
+    }
+
+    #[test]
+    fn the_phones_own_words_for_the_cipher_become_the_kernels() {
+        let e = entry("metadata_encryption=aes-256-xts:wrappedkey_v0,keydirectory=/metadata/vold/metadata_encryption");
+        assert_eq!(Encryption::of(&e).unwrap(), Encryption { cipher: "aes-xts-plain64".into(), wrapped: true });
+        let plain = entry("metadata_encryption=adiantum");
+        assert_eq!(Encryption::of(&plain).unwrap(), Encryption { cipher: "xchacha12,aes-adiantum-plain64".into(), wrapped: false });
+    }
+
+    #[test]
+    fn a_cipher_or_a_key_the_phone_does_not_name_is_an_error() {
+        assert!(Encryption::of(&entry("quota")).is_err());
+        assert!(Encryption::of(&entry("metadata_encryption=rot13")).is_err());
+        assert!(key_dir(&entry("quota")).is_err());
+    }
+
+    #[test]
+    fn the_key_is_in_a_directory_under_the_one_the_phone_names() {
+        let e = entry("keydirectory=/metadata/vold/metadata_encryption");
+        assert_eq!(key_dir(&e).unwrap(), Path::new("/metadata/vold/metadata_encryption/key"));
+    }
+
+    #[test]
+    fn the_partition_is_mapped_in_whole_units_of_the_hardwares_reads() {
+        let e = Encryption { cipher: "aes-xts-plain64".into(), wrapped: true };
+        let t = target("/dev/block/by-name/userdata", 969_825_751, &[0xAB, 0x01], &e);
+        let Target::DefaultKey { sectors, key, cipher, device, wrapped } = t else { panic!("a decrypting target") };
+        assert_eq!(sectors, 969_825_744, "a whole number of 4096-byte units");
+        assert_eq!(key, "ab01");
+        assert_eq!(cipher, "aes-xts-plain64");
+        assert_eq!(device, "/dev/block/by-name/userdata");
+        assert!(wrapped);
+    }
 }
