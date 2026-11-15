@@ -20,7 +20,9 @@ use std::path::{Path, PathBuf};
 
 const VENDOR: &str = "/vendor/etc/vintf";
 const COPY: &str = "/tmp/vintf";
-const MANAGER: &str = "/mnt/system/system/bin/hwservicemanager";
+/// Where the installed system keeps its hardware service directory, by
+/// build: MIUI 14 has it in system, HyperOS 3 in system_ext.
+const MANAGERS: [&str; 2] = ["/mnt/system/system/bin/hwservicemanager", "/mnt/system_ext/bin/hwservicemanager"];
 const LINK: &str = "/system/bin/hwservicemanager";
 
 const MANIFEST: &str = r#"<manifest version="1.0" type="device">
@@ -66,9 +68,18 @@ const MANIFEST: &str = r#"<manifest version="1.0" type="device">
 /// recovery: the name `libhidlbase` looks for, and a manifest that names
 /// the services this recovery starts.
 pub fn prepare() -> Result<()> {
-    if !Path::new(LINK).exists() {
-        std::os::unix::fs::symlink(MANAGER, LINK).with_context(|| format!("link {LINK} to {MANAGER}"))?;
+    let manager = MANAGERS.iter().find(|path| Path::new(path).is_file()).copied().unwrap_or(MANAGERS[0]);
+    // A link left from an earlier run may point at the other build's
+    // path, or at a partition that is not mounted yet; it is replaced
+    // rather than made again and refused as already there.
+    match std::fs::symlink_metadata(LINK) {
+        Ok(_) => {
+            let _ = std::fs::remove_file(LINK);
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+        Err(e) => return Err(e).with_context(|| format!("look at {LINK}")),
     }
+    std::os::unix::fs::symlink(manager, LINK).with_context(|| format!("link {LINK} to {manager}"))?;
     // Already put in place on this boot: the copy is the mount's source, so
     // copying over it again would empty the directory it serves.
     if mounted(VENDOR) {

@@ -522,8 +522,12 @@ fn bring_up(cfg: &DeviceConfig, slot: skyward_vab::Slot) -> Result<()> {
         let at = skyward_block::fstab::mount(name)?;
         skyward_sys::kmsg(&format!("{name} is mounted on {}", at.display()))?;
     }
-    vintf::prepare().context("make the phone's hardware services reachable")?;
-    skyward_sys::kmsg("the phone's hardware service manifest is ready")?;
+    match vintf::prepare() {
+        Ok(()) => skyward_sys::kmsg("the phone's hardware service manifest is ready")?,
+        // The key service and the rest can still start without it, and
+        // stopping here is what left data closed after a restart.
+        Err(e) => skyward_sys::kmsg(&format!("the phone's hardware services are not ready: {e:#}"))?,
+    }
     let impls = vintf::impl_links().context("give the phone's passthrough services the names their loaders ask for")?;
     for path in load_modules(cfg, &cfg.modules.load)? {
         skyward_sys::kmsg(&format!("loaded {}", path.display()))?;
