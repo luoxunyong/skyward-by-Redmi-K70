@@ -423,6 +423,7 @@ pub fn settings(cx: &Ctx) -> Frame {
     y = widgets::section(&mut c, t, f, debug.bottom, l.pick(["关于", "關於", "About"]));
     let mut rows = vec![Row::new(l.pick(ABOUT)).trail(Trail::Value(VERSION))];
     let mut opens = vec![Action::Open(Screen::About)];
+    let mirror_value = mirrors_value(cx);
     if s.offers(Screen::SkywardUpdate) {
         let row = Row::new(l.pick(SKYWARD_UPDATE));
         rows.push(match skyward_value(cx) {
@@ -430,10 +431,29 @@ pub fn settings(cx: &Ctx) -> Frame {
             None => row,
         });
         opens.push(Action::Open(Screen::SkywardUpdate));
+        let row = Row::new(l.pick(["GitHub 镜像源", "GitHub 鏡像來源", "GitHub mirrors"]));
+        rows.push(match &mirror_value {
+            Some(value) => row.trail(Trail::Value(value.as_str())),
+            None => row,
+        });
+        opens.push(Action::Open(Screen::SkywardUpdate));
     }
     let about = widgets::list(&mut c, t, f, y, &rows);
     out.extend(hits(&about.rows, &opens));
     Frame::new(t, fit(c, t, about.bottom), out, l.pick(SETTINGS), top)
+}
+
+/// What the settings page says beside its GitHub mirrors entry: the
+/// fastest source found, or that the sources are being timed.
+fn mirrors_value(cx: &Ctx) -> Option<String> {
+    let (s, l) = (cx.state, cx.state.lang);
+    if let Some((name, ms)) = s.skyward_sources.as_ref().and_then(|sources| sources.first()) {
+        return Some(match ms {
+            Some(ms) => format!("{name} · {ms} ms"),
+            None => name.clone(),
+        });
+    }
+    matches!(s.skyward_check, SkywardCheck::Asking).then(|| l.pick(["测速中", "測速中", "Timing"]).to_string())
 }
 
 /// What the settings page says beside its Skyward update entry: an update
@@ -3014,7 +3034,10 @@ pub fn skyward_update(cx: &Ctx) -> Frame {
                 .enumerate()
                 .map(|(i, ((name, _), took))| Row::new(name).subtitle(took).trail(Trail::Check(i == 0)))
                 .collect();
-            widgets::list(&mut c, t, f, y, &rows).bottom
+            let list = widgets::list(&mut c, t, f, y, &rows);
+            let again = widgets::list(&mut c, t, f, list.bottom + t.m.dp(8.0), &[Row::new(l.pick(["重新测速", "重新測速", "Time again"]))]);
+            out.extend(hits(&again.rows, &[Action::CheckSkyward]));
+            again.bottom
         }
         _ => y,
     };

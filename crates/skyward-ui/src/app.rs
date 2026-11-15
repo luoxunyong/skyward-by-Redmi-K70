@@ -1844,6 +1844,9 @@ pub struct State {
     /// Which of the page's swipe-to-confirm controls the hand is on; only
     /// that one's knob moves.
     pub confirming: Option<Confirm>,
+    /// A knob let go short of its end, on its way back: the control, when
+    /// it was let go, and how far along the track it was.
+    pub confirm_return: Option<(Confirm, u64, f32)>,
     pub install: Install,
     /// Where the package being installed comes from.
     pub source: Source,
@@ -2026,6 +2029,7 @@ impl Default for State {
             pattern: Vec::new(),
             confirm: 0.0,
             confirming: None,
+            confirm_return: None,
             install: Install::Idle,
             source: Source::Computer,
             package_name: None,
@@ -2104,7 +2108,7 @@ impl State {
     /// is on moves, so a second swipe-to-confirm on the page stays at its
     /// start.
     pub fn confirm_progress(&self, which: Confirm) -> f32 {
-        if self.confirming == Some(which) {
+        if self.confirming == Some(which) || self.confirm_return.is_some_and(|(w, _, _)| w == which) {
             self.confirm
         } else {
             0.0
@@ -2569,6 +2573,8 @@ const CHORD_MS: u64 = 150;
 const SLID: f32 = 0.9;
 /// How long the power key held takes the knob the whole way along.
 const SLIDE_MS: u64 = 700;
+/// How long a knob let go short of its end takes to spring back.
+const CONFIRM_RETURN_PERIOD: f32 = 0.35;
 /// The response, in seconds, of the spring the page scrolls on to show
 /// the control the keys moved to.
 const SEEK_PERIOD: f32 = 0.35;
@@ -3307,6 +3313,15 @@ impl App {
                 self.dirty = true;
             }
         }
+        if let Some((_, start, from)) = self.state.confirm_return {
+            let left = 1.0 - motion::settle(now.saturating_sub(start), CONFIRM_RETURN_PERIOD);
+            self.state.confirm = from * left;
+            self.dirty = true;
+            if left <= 0.0 {
+                self.state.confirm = 0.0;
+                self.state.confirm_return = None;
+            }
+        }
         if let Some(fling) = self.fling {
             let (y, done) = fling.at(now);
             let next = y.clamp(0.0, self.max_scroll());
@@ -3547,6 +3562,7 @@ impl App {
             Drag::Confirm { .. } => {
                 self.state.confirm = 0.0;
                 self.state.confirming = None;
+                self.state.confirm_return = None;
                 self.refresh();
             }
             Drag::Pattern => {
@@ -6731,7 +6747,8 @@ impl App {
                         Drag::Slider(which, track)
                     }
                     Some((Action::Confirm(which), track)) if self.on_knob(which, track, x) => {
-                        if self.state.confirming != Some(which) {
+                        let returning = self.state.confirm_return.take().is_some();
+                        if self.state.confirming != Some(which) && !returning {
                             self.state.confirm = 0.0;
                         }
                         self.state.confirming = Some(which);
@@ -6874,11 +6891,20 @@ impl App {
                 }
                 Drag::Confirm { which, track, .. } => {
                     let done = self.state.confirm > SLID;
-                    self.state.confirm = 0.0;
-                    self.state.confirming = None;
-                    self.repaint_confirm(&t, f, which, track);
                     if done {
+                        self.state.confirm = 0.0;
+                        self.state.confirming = None;
+                        self.state.confirm_return = None;
+                        self.repaint_confirm(&t, f, which, track);
                         fx.extend(self.confirmed(which, now));
+                    } else {
+                        // Let go short of the end, the knob stays where it
+                        // was and eases back, rather than jumping to the
+                        // start under the hand.
+                        let from = self.state.confirm;
+                        self.state.confirming = None;
+                        self.state.confirm_return = Some((which, now, from));
+                        self.repaint_confirm(&t, f, which, track);
                     }
                 }
                 Drag::Pattern => fx.extend(self.drawn(now)),
@@ -7111,6 +7137,7 @@ impl App {
     fn let_knob_go(&mut self, which: Confirm, track: Rect) {
         self.state.confirm = 0.0;
         self.state.confirming = None;
+        self.state.confirm_return = None;
         self.knob = Some((which, track));
         self.dirty = true;
     }
@@ -9121,14 +9148,21 @@ mod tests {
     }
 
     #[test]
-    fn letting_go_halfway_does_not_reboot() {
+    fn letting_go_halfway_does_not_reboot_and_springs_back() {
         let (f, i) = (fonts(), info());
         let mut app = App::new(Screen::Reboot, W, H, PPD);
         let track = app.frame(&f, &i).hits.iter().find(|h| h.action == Action::Confirm(Confirm::Reboot)).unwrap().rect;
         let y = track.centre().1;
         app.touch(Touch::Down(track.x + track.h / 2.0, y), &f, 0);
         app.touch(Touch::Move(track.x + track.w / 2.0, y), &f, 0);
+        let let_go = app.state.confirm;
+        assert!(let_go > 0.0);
         assert!(app.touch(Touch::Up, &f, 0).is_empty());
+        assert_eq!(app.state.confirm, let_go, "the knob stays where it was let go");
+        app.tick(100);
+        assert!(app.state.confirm < let_go && app.state.confirm > 0.0, "it eases back, not all at once");
+        app.tick(2000);
+        assert_eq!(app.state.confirm, 0.0, "and settles at the start");
     }
 
     #[test]
@@ -11776,6 +11810,17 @@ mod tests {
         assert!(!app.frame(&f, &i).hits.iter().any(|h| h.action == Action::UpdateSkyward), "nothing newer to update to");
         app.key(Key::Back, 0);
         assert!(tap(&mut app, &f, &i, Action::Open(Screen::SkywardUpdate)).is_empty(), "an answer heard is not asked again");
+    }
+
+    #[test]
+    fn the_settings_page_has_a_github_mirrors_entry_beside_skyward_update() {
+        let (f, i) = (fonts(), info());
+        let mut app = App::new(Screen::Settings, W, H, PPD);
+        app.state.wlan = Some(connected("Skyward"));
+        app.state.recovery_partitions = true;
+        app.refresh();
+        let opens = app.frame(&f, &i).hits.iter().filter(|h| h.action == Action::Open(Screen::SkywardUpdate)).count();
+        assert_eq!(opens, 2, "Skyward update and GitHub mirrors");
     }
 
     #[test]
