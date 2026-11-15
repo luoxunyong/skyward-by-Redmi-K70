@@ -12,13 +12,35 @@ use std::path::{Path, PathBuf};
 
 const PARTITION: &str = "recovery";
 
-/// The image the zip at `path` holds, its only entry, read whole.
+/// The image the zip at `path` holds, read whole. The zip's other entries,
+/// such as the flash instructions and the sums, are passed over; where it
+/// holds more than one image, the recovery build is the one taken.
 pub fn unzip(path: &Path) -> Result<Vec<u8>> {
     let file = File::open(path).with_context(|| format!("open {}", path.display()))?;
     let mut zip = zip::ZipArchive::new(file).with_context(|| format!("read {} as a zip", path.display()))?;
-    ensure!(zip.len() == 1, "{} holds {} entries, and a release's zip holds its image alone", path.display(), zip.len());
-    let mut entry = zip.by_index(0).context("open the image in the zip")?;
-    ensure!(entry.name().ends_with(".img"), "the zip holds {}, which is not an image", entry.name());
+    let mut images = Vec::new();
+    for i in 0..zip.len() {
+        let entry = zip.by_index(i).with_context(|| format!("read entry {i} of {}", path.display()))?;
+        if entry.name().to_ascii_lowercase().ends_with(".img") {
+            images.push((i, entry.name().to_string()));
+        }
+    }
+    ensure!(!images.is_empty(), "{} holds no image", path.display());
+    let index = match images.len() {
+        1 => images[0].0,
+        _ => {
+            let builds: Vec<_> = images
+                .iter()
+                .filter(|(_, name)| {
+                    let name = name.to_ascii_lowercase();
+                    name.contains("skyward") || name.starts_with("recovery")
+                })
+                .collect();
+            ensure!(builds.len() == 1, "{} holds {} images, and not one recovery build", path.display(), images.len());
+            builds[0].0
+        }
+    };
+    let mut entry = zip.by_index(index).context("open the image in the zip")?;
     let mut image = Vec::with_capacity(entry.size() as usize);
     entry.read_to_end(&mut image).context("unzip the image")?;
     Ok(image)
@@ -79,8 +101,16 @@ mod tests {
         let image = skyward_for("ishtar");
         let zip = zipped(&[("skyward-v0.1.4-ishtar-OS3.0.308.0.WMACNXM.img", &image)]);
         assert_eq!(unzip(zip.path()).unwrap(), image);
+        let packed = zipped(&[
+            ("skyward-vermeer-v0.2.0-25d017f-20261114.img", &image),
+            ("flash.txt", b"flash it"),
+            ("SHA256SUMS", b"sums"),
+        ]);
+        assert_eq!(unzip(packed.path()).unwrap(), image, "the image beside the notes");
+        let old = zipped(&[("skyward-vermeer-v0.2.0-7d47475.img", &image), ("vbmeta-disabled.img", &image)]);
+        assert_eq!(unzip(old.path()).unwrap(), image, "the build, not the vbmeta");
         let two = zipped(&[("a.img", &image), ("b.img", &image)]);
-        assert!(unzip(two.path()).is_err(), "a zip with more than the image");
+        assert!(unzip(two.path()).is_err(), "two images, neither the build");
         let other = zipped(&[("notes.txt", b"not an image")]);
         assert!(unzip(other.path()).is_err());
         let unzipped = tempfile::NamedTempFile::new().unwrap();

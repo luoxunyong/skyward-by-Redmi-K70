@@ -843,6 +843,7 @@ fn identify(path: &Path) -> Result<()> {
             }
         }
         Package::Image(kind) => println!("{kind:?}, for {}", kind.partitions().join(" or ")),
+        Package::ZippedImage { name } => println!("a zip holding {name}, to flash as the image it holds"),
         Package::Script => println!("a zip that installs itself with a script"),
         Package::System(c) => {
             println!("the system {} {} ({}), to install beside the installed one", c.manifest.name, c.manifest.version, c.manifest.id);

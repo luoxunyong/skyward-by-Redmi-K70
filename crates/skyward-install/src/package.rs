@@ -29,6 +29,9 @@ pub enum Package {
     Image(ImageKind),
     /// A zip that installs itself by running the script inside it.
     Script,
+    /// A zip holding one partition image at its top, which is taken out
+    /// and flashed as the image it holds.
+    ZippedImage { name: String },
     /// A system to install beside the installed one.
     System(skyward_systems::package::Contents),
     Unknown,
@@ -98,7 +101,29 @@ pub fn identify<R: Read + Seek>(mut file: R) -> Result<Package> {
     if zip.index_for_name(UPDATE_BINARY).is_some() {
         return Ok(Package::Script);
     }
+    if let Some(name) = zipped_image(&mut zip) {
+        return Ok(Package::ZippedImage { name });
+    }
     Ok(Package::Unknown)
+}
+
+/// The one image a zip holds at its top, when it holds exactly one: a
+/// recovery's card-flash package is a zip with its image beside the
+/// instructions, and no install script.
+fn zipped_image<R: Read + Seek>(zip: &mut ZipArchive<R>) -> Option<String> {
+    let mut found = None;
+    for i in 0..zip.len() {
+        let Ok(entry) = zip.by_index(i) else { continue };
+        let name = entry.name();
+        if name.contains('/') || !name.to_ascii_lowercase().ends_with(".img") {
+            continue;
+        }
+        if found.is_some() {
+            return None;
+        }
+        found = Some(name.to_string());
+    }
+    found
 }
 
 fn update<R: Read + Seek>(zip: &mut ZipArchive<R>) -> Result<Update> {
@@ -316,5 +341,23 @@ METADATA_SIZE=1024
         let other = zip_with(&[("readme.txt", b"hello", CompressionMethod::Stored)]);
         assert_eq!(identify(Cursor::new(other)).unwrap(), Package::Unknown);
         assert_eq!(identify(Cursor::new(b"just some text".to_vec())).unwrap(), Package::Unknown);
+    }
+
+    #[test]
+    fn a_zip_with_one_image_beside_its_notes_is_a_card_flash_package() {
+        let image = b"ANDROID! not really an image";
+        let bytes = zip_with(&[
+            ("recovery.img", image, CompressionMethod::Stored),
+            ("flash.txt", b"flash recovery.img", CompressionMethod::Stored),
+            ("SHA256SUMS", b"sums", CompressionMethod::Stored),
+        ]);
+        assert_eq!(identify(Cursor::new(bytes)).unwrap(), Package::ZippedImage { name: "recovery.img".into() });
+        let two = zip_with(&[
+            ("recovery.img", image, CompressionMethod::Stored),
+            ("boot.img", image, CompressionMethod::Stored),
+        ]);
+        assert_eq!(identify(Cursor::new(two)).unwrap(), Package::Unknown, "one image at most");
+        let nested = zip_with(&[("images/recovery.img", image, CompressionMethod::Stored)]);
+        assert_eq!(identify(Cursor::new(nested)).unwrap(), Package::Unknown, "only the top of the zip");
     }
 }

@@ -527,6 +527,7 @@ fn install<S>(ctx: &mut Context, mount: &Mount<S>, size: u64) -> Result<Done> {
         // where it goes.
         Package::Image(_) if matches!(ctx.origin, Origin::Asked { .. }) => Ok(Done::Decided(Outcome::Refused(Refusal::Image))),
         Package::Image(kind) => flash_image(ctx, kind, size),
+        Package::ZippedImage { name } => flash_zipped_image(ctx, &name),
         Package::Script => run_script(ctx, size, || mount.pulled()),
         Package::System(contents) => install_system(ctx, &contents),
         Package::Unknown => Ok(Done::Decided(Outcome::Refused(Refusal::Unknown))),
@@ -639,6 +640,7 @@ fn describe(package: &Package) -> String {
     match package {
         Package::Update(u) => format!("an update to {}", u.version().unwrap_or("an unnamed version")),
         Package::Image(kind) => format!("an image of {kind:?}"),
+        Package::ZippedImage { name } => format!("a zip holding {name}, to flash"),
         Package::Script => "a zip with an install script".into(),
         Package::System(c) => format!("the system {} {}, to install beside the installed one", c.manifest.name, c.manifest.version),
         Package::Unknown => "a file of no known kind".into(),
@@ -886,6 +888,13 @@ fn lines(from: impl Read, mut each: impl FnMut(&str) -> io::Result<()>) -> io::R
 }
 
 fn flash_image(ctx: &Context, kind: ImageKind, size: u64) -> Result<Done> {
+    flash_image_at(ctx, kind, size, Path::new(fuse::PACKAGE))
+}
+
+/// Take the image out of the zip being served and flash it as the image it
+/// holds: the image is read from `source`, which is the package itself or
+/// the image taken out of it.
+fn flash_image_at(ctx: &Context, kind: ImageKind, size: u64, source: &Path) -> Result<Done> {
     let dir = Path::new(skyward_block::BY_NAME);
     let partitions = image::partitions(kind, dir)?;
     if partitions.is_empty() {
@@ -903,7 +912,7 @@ fn flash_image(ctx: &Context, kind: ImageKind, size: u64) -> Result<Done> {
         installed_boot_set()?;
     }
     let devices: Vec<_> = slots.iter().map(|&slot| image::device(dir, partition, slot)).collect();
-    let mut file = BufReader::with_capacity(1 << 20, File::open(fuse::PACKAGE).context("open the package")?);
+    let mut file = BufReader::with_capacity(1 << 20, File::open(source).with_context(|| format!("open {}", source.display()))?);
     let mut told: Option<Instant> = None;
     image::flash(&mut file, size, &devices, &mut |done, total| {
         if done == total || told.is_none_or(|t| t.elapsed() >= PROGRESS_EVERY) {
@@ -912,6 +921,32 @@ fn flash_image(ctx: &Context, kind: ImageKind, size: u64) -> Result<Done> {
         }
     })?;
     Ok(Done::Decided(Outcome::Flashed { partition, slots }))
+}
+
+/// Take the image `name` out of the zip being served and flash it.
+fn flash_zipped_image(ctx: &Context, name: &str) -> Result<Done> {
+    let path = Path::new("/tmp/skyward-zipped.img");
+    let size = extract_image(name, path)?;
+    let mut file = BufReader::with_capacity(1 << 16, File::open(path).with_context(|| format!("open {}", path.display()))?);
+    let mut head = vec![0u8; 4096];
+    let read = file.read(&mut head).context("read the image taken out of the zip")?;
+    head.truncate(read);
+    let kind = image::detect(&mut file, &head)
+        .context("look into the image taken out of the zip")?
+        .with_context(|| format!("{name} is not a partition image this recovery writes"))?;
+    let done = flash_image_at(ctx, kind, size, path);
+    let _ = fs::remove_file(path);
+    done
+}
+
+/// Take `name` out of the zip being served into `path`, and give its size.
+fn extract_image(name: &str, path: &Path) -> Result<u64> {
+    let zip = File::open(fuse::PACKAGE).context("open the package")?;
+    let mut zip = zip::ZipArchive::new(BufReader::new(zip)).context("read the zip directory")?;
+    let mut entry = zip.by_name(name).with_context(|| format!("open {name}"))?;
+    let mut out = File::create(path).with_context(|| format!("make {}", path.display()))?;
+    io::copy(&mut entry, &mut out).with_context(|| format!("take {name} out of the zip"))?;
+    Ok(entry.size())
 }
 
 /// Run the install script of the zip being served, `size` bytes, once the
