@@ -10,6 +10,7 @@
 
 use crate::{BootSlots, MergeStatus, Slot};
 use anyhow::{bail, Context, Result};
+use std::path::Path;
 use skyward_binder::driver::{Binder, Handle};
 use skyward_binder::hidl::{self, Answer, Message};
 use skyward_binder::parcel::{Parcel, Reader};
@@ -53,6 +54,26 @@ const YES: i32 = 1;
 pub enum BootControl<'a> {
     Newer(Handle<'a>),
     Older(Handle<'a>),
+}
+
+/// What the running slot can say of the slots when the phone's boot
+/// control cannot be asked: which slot this is, and whether each slot has
+/// a boot image. The slot that starts next is taken as this one, since
+/// nothing else can be asked.
+pub fn fallback_slots() -> Result<BootSlots> {
+    let current = crate::current_slot()?.context("not an A/B phone")?;
+    let dir = Path::new(skyward_block::BY_NAME);
+    let bootable = |slot: Slot| {
+        ["boot", "init_boot", "vendor_boot"].iter().any(|name| {
+            let path = dir.join(format!("{name}{}", slot.suffix()));
+            std::fs::metadata(&path).is_ok_and(|m| m.len() > 0)
+        })
+    };
+    Ok(BootSlots {
+        active: current,
+        bootable: [bootable(Slot::A), bootable(Slot::B)],
+        successful: [current == Slot::A, current == Slot::B],
+    })
 }
 
 /// The slot the bootloader starts next, as the running boot control tells
