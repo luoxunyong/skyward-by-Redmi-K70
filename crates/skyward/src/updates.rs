@@ -394,21 +394,28 @@ fn fetch(
 /// first, and name it with its time for the page. A source that does not
 /// answer goes last, where the download still tries it before giving up.
 fn fastest(servers: &Servers, sources: Vec<String>, link: &str) -> (Vec<String>, String, Vec<(String, String, Option<u64>)>) {
-    let probed = std::thread::scope(|scope| {
-        let handles: Vec<_> = sources
-            .into_iter()
-            .map(|url| {
-                let servers = servers.clone();
-                scope.spawn(move || {
-                    let agent = http::probe_agent(servers);
-                    let ms = github::probe(&agent, &url);
-                    (url, ms)
+    // Probing every source at once opens a connection for each of them;
+    // two at a time is enough for the few sources there are and leaves the
+    // rest of the machine to the page.
+    let mut probed = Vec::new();
+    for chunk in sources.chunks(2) {
+        let chunk: Vec<String> = chunk.to_vec();
+        let found = std::thread::scope(|scope| {
+            let handles: Vec<_> = chunk
+                .into_iter()
+                .map(|url| {
+                    let servers = servers.clone();
+                    scope.spawn(move || {
+                        let agent = http::probe_agent(servers);
+                        let ms = github::probe(&agent, &url);
+                        (url, ms)
+                    })
                 })
-            })
-            .collect();
-        handles.into_iter().filter_map(|h| h.join().ok()).collect::<Vec<_>>()
-    });
-    let mut probed = probed;
+                .collect();
+            handles.into_iter().filter_map(|h| h.join().ok()).collect::<Vec<_>>()
+        });
+        probed.extend(found);
+    }
     probed.sort_by_key(|(_, ms)| ms.unwrap_or(Duration::MAX));
     for (url, ms) in &probed {
         let said = match ms {

@@ -17,8 +17,10 @@ use std::time::{Duration, Instant};
 /// before it is started again.
 const RESTART_DELAY: Duration = Duration::from_secs(1);
 
-/// How long a program gets to become what it says it will be.
-const READY_TIMEOUT: Duration = Duration::from_secs(20);
+/// How long a program gets to become what it says it will be. A service
+/// that fails is started again by its supervisor, so waiting longer only
+/// holds the pages back.
+const READY_TIMEOUT: Duration = Duration::from_secs(5);
 const READY_POLL: Duration = Duration::from_millis(100);
 
 /// Where the kernel says the highest capability it knows.
@@ -40,6 +42,7 @@ const CAPABILITY_VERSION_3: u32 = 0x2008_0522;
 /// need, searched after whatever it names itself.
 pub fn start(services: &[Service], libraries: Option<&Path>, impls: Option<&Path>) -> Result<()> {
     let known = ueventd::accounts(&ueventd::PASSWD_FILES.iter().chain(&ueventd::GROUP_FILES).copied().collect::<Vec<_>>());
+    let mut waiting_for = Vec::new();
     for s in services {
         let mut s = s.clone();
         if !Path::new(&s.path).is_file() {
@@ -64,7 +67,24 @@ pub fn start(services: &[Service], libraries: Option<&Path>, impls: Option<&Path
         let waiting = s.clone();
         let name = Path::new(&s.path).file_name().map_or_else(|| s.path.clone(), |n| n.to_string_lossy().into_owned());
         thread::Builder::new().name(name).spawn(move || supervise(&s, &who)).context("start a supervising thread")?;
-        ready(&waiting)?;
+        waiting_for.push(waiting);
+    }
+    // Wait for all of them at once: one that is slow, or never comes up,
+    // must not add its timeout to the next one's.
+    let waits: Vec<_> = waiting_for
+        .into_iter()
+        .map(|s| thread::spawn(move || ready(&s).map_err(|e| format!("{e:#}"))))
+        .collect();
+    let mut errors = Vec::new();
+    for wait in waits {
+        match wait.join() {
+            Ok(Ok(())) => {}
+            Ok(Err(e)) => errors.push(e),
+            Err(_) => errors.push("a service readiness check panicked".to_string()),
+        }
+    }
+    if !errors.is_empty() {
+        bail!("{}", errors.join("; "));
     }
     Ok(())
 }
@@ -196,6 +216,7 @@ fn ready(s: &Service) -> Result<()> {
 }
 
 fn supervise(s: &Service, who: &Credentials) -> ! {
+    let mut quick = 0u32;
     loop {
         let started = Instant::now();
         let ended = match running(&s.path) {
@@ -208,7 +229,13 @@ fn supervise(s: &Service, who: &Credentials) -> ! {
         };
         let _ = skyward_sys::kmsg(&line);
         if started.elapsed() < RESTART_DELAY {
-            thread::sleep(RESTART_DELAY);
+            // A service that ends at once is tried again more and more
+            // slowly, rather than every second: it is not what the pages
+            // wait on, and its attempts should not fill the log.
+            quick = (quick + 1).min(4);
+            thread::sleep(RESTART_DELAY * (1 << (quick - 1)));
+        } else {
+            quick = 0;
         }
     }
 }

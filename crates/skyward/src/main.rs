@@ -220,7 +220,14 @@ fn main() -> Result<()> {
     let started_as = std::env::args_os().next().unwrap_or_default();
     let name = Path::new(&started_as).file_name().unwrap_or_default();
     if name == "recovery" {
-        return recovery();
+        std::panic::set_hook(Box::new(|info| {
+            let _ = skyward_sys::kmsg(&format!("panic: {info}"));
+        }));
+        if let Err(e) = recovery() {
+            let _ = skyward_sys::kmsg(&format!("recovery stopped: {e:#}"));
+            return Err(e);
+        }
+        return Ok(());
     }
     // Install scripts run the commands linked to this binary by their names.
     let args: Vec<_> = std::env::args_os().skip(1).collect();
@@ -705,9 +712,10 @@ fn recovery() -> Result<()> {
         }
         let cfg = DeviceConfig::load(Path::new("/").join(ramdisk::CONFIG))?;
         skyward_sys::kmsg(&format!(
-            "{} {} recovery up, misc command {:?} args {:?}, asking for {:?}",
+            "{} {} ({}) recovery up, misc command {:?} args {:?}, asking for {:?}",
             cfg.device.codename,
             skyward_info::VERSION,
+            skyward_info::BUILD,
             message.command,
             message.args,
             request.work
