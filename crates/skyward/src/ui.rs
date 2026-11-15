@@ -969,8 +969,16 @@ fn read_mounts(services: &[Service]) -> Result<Vec<skyward_ui::app::MountRow>> {
 fn read_slots() -> Result<skyward_vab::BootSlots, String> {
     let read = || -> Result<skyward_vab::BootSlots> {
         let (binder, hardware) = (skyward_binder::driver::Binder::open()?, skyward_binder::driver::Binder::hardware()?);
-        let control = skyward_vab::boot::BootControl::open(&binder, &hardware)?;
-        control.slots()
+        match skyward_vab::boot::BootControl::open(&binder, &hardware).and_then(|control| control.slots()) {
+            Ok(slots) => Ok(slots),
+            Err(why) => {
+                // The boot control service is not running on every phone;
+                // the slots this run can see are still shown rather than
+                // the page saying nothing at all.
+                let _ = skyward_sys::kmsg(&format!("reading the slots without the boot control: {why:#}"));
+                skyward_vab::boot::fallback_slots()
+            }
+        }
     };
     read().map_err(|e| format!("{e:#}"))
 }

@@ -956,7 +956,15 @@ fn slot() -> Result<()> {
                 }
                 println!("update {:?}", control.merge_status()?);
             }
-            Err(e) => println!("{e:#}"),
+            Err(e) => {
+                println!("{e:#}");
+                let slots = skyward_vab::boot::fallback_slots()?;
+                println!("next {}", slots.active.suffix());
+                for slot in [skyward_vab::Slot::A, skyward_vab::Slot::B] {
+                    let k = slot.number() as usize;
+                    println!("{} bootable {} successful {}", slot.suffix(), slots.bootable[k], slots.successful[k]);
+                }
+            }
         }
     }
     Ok(())
