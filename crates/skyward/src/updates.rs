@@ -47,7 +47,7 @@ pub enum Task {
     /// phone `codename` names, and write the image into the recovery
     /// partitions of the slot that starts next and of any other slot that
     /// holds Skyward.
-    UpdateSkyward { build: Build, codename: String, path: PathBuf },
+    UpdateSkyward { build: Build, codename: String, path: PathBuf, preferred: Option<String> },
 }
 
 pub enum Event {
@@ -57,8 +57,9 @@ pub enum Event {
     /// The source the build is downloaded from, named with how long it took
     /// to answer.
     SkywardSource(String),
-    /// Every source, the fastest first, with how long each took to answer.
-    SkywardSources(Vec<(String, Option<u64>)>),
+    /// Every source, the fastest first: its name, its address, and how
+    /// long it took to answer.
+    SkywardSources(Vec<(String, String, Option<u64>)>),
     /// How far the download has come, and how fast it goes, in bytes a
     /// second.
     Progress(Progress, u64),
@@ -181,7 +182,7 @@ impl Worker {
                     // of the file itself, which it gives again once one has
                     // run out and is turned down; the release's link on
                     // github.com is tried after it.
-                    Task::UpdateSkyward { build, codename, path } => {
+                    Task::UpdateSkyward { build, codename, path, preferred } => {
                         let a = http::agent(servers.clone());
                         *using.lock().expect("the agent is not held by a thread that panicked") = Some(a.clone());
                         let located = github::locate(&a, &build.url, skyward_info::VERSION)
@@ -204,7 +205,19 @@ impl Worker {
                             }
                         };
                         let sum = Sum::Sha256(build.sha256.clone());
-                        let (sources, source, list) = fastest(&servers, build.sources(located), &build.link);
+                        let (mut sources, mut source, list) = fastest(&servers, build.sources(located), &build.link);
+                        if let Some(preferred) = preferred.as_deref() {
+                            if let Some(at) = sources.iter().position(|url| url == preferred) {
+                                let url = sources.remove(at);
+                                sources.insert(0, url);
+                            }
+                            if let Some((name, _, ms)) = list.iter().find(|(_, url, _)| url == preferred) {
+                                source = match ms {
+                                    Some(ms) => format!("{name} · {ms} ms"),
+                                    None => name.clone(),
+                                };
+                            }
+                        }
                         tell(Event::SkywardSources(list));
                         tell(Event::SkywardSource(source));
                         let end = match fetch(&servers, sources, &sum, &build.name, &path, &stopping, &using, &tell, &mut refused) {
@@ -380,7 +393,7 @@ fn fetch(
 /// Ask every source at once how long it takes to answer, put the fastest
 /// first, and name it with its time for the page. A source that does not
 /// answer goes last, where the download still tries it before giving up.
-fn fastest(servers: &Servers, sources: Vec<String>, link: &str) -> (Vec<String>, String, Vec<(String, Option<u64>)>) {
+fn fastest(servers: &Servers, sources: Vec<String>, link: &str) -> (Vec<String>, String, Vec<(String, String, Option<u64>)>) {
     let probed = std::thread::scope(|scope| {
         let handles: Vec<_> = sources
             .into_iter()
@@ -410,7 +423,7 @@ fn fastest(servers: &Servers, sources: Vec<String>, link: &str) -> (Vec<String>,
     };
     let list = probed
         .iter()
-        .map(|(url, ms)| (github::source_name(url, link), ms.map(|ms| ms.as_millis() as u64)))
+        .map(|(url, ms)| (github::source_name(url, link), url.clone(), ms.map(|ms| ms.as_millis() as u64)))
         .collect();
     (probed.into_iter().map(|(url, _)| url).collect(), source, list)
 }

@@ -282,7 +282,8 @@ fn main() -> Result<()> {
             let props = skyward_info::installed_props(booted_slot()?)?;
             let mut services = DeviceConfig::load(&config)?.services;
             services.retain(|s| s.runs_on(&props));
-            services::start(&services, secure::libraries()?.as_deref())?;
+            let impls = vintf::impl_links()?;
+            services::start(&services, secure::libraries()?.as_deref(), impls.as_deref())?;
             loop {
                 std::thread::park();
             }
@@ -516,6 +517,7 @@ fn bring_up(cfg: &DeviceConfig, slot: skyward_vab::Slot) -> Result<()> {
     }
     vintf::prepare().context("make the phone's hardware services reachable")?;
     skyward_sys::kmsg("the phone's hardware service manifest is ready")?;
+    let impls = vintf::impl_links().context("give the phone's passthrough services the names their loaders ask for")?;
     for path in load_modules(cfg, &cfg.modules.load)? {
         skyward_sys::kmsg(&format!("loaded {}", path.display()))?;
     }
@@ -544,7 +546,7 @@ fn bring_up(cfg: &DeviceConfig, slot: skyward_vab::Slot) -> Result<()> {
     if let Some(dir) = &libraries {
         skyward_sys::kmsg(&format!("the phone's own libraries are at {}", dir.display()))?;
     }
-    services::start(&services, libraries.as_deref())?;
+    services::start(&services, libraries.as_deref(), impls.as_deref())?;
     agree_on_the_notes_key(&registering)
 }
 

@@ -212,7 +212,7 @@ fn prepare() -> Result<()> {
             groups: vec!["system".into(), "drmrpc".into(), "diag".into(), "input".into(), "uhid".into()],
             capabilities: vec!["SYS_NICE".into()],
         };
-        crate::services::start(&[service], None).context("start the fingerprint daemon")?;
+        crate::services::start(&[service], None, None).context("start the fingerprint daemon")?;
     }
     Ok(())
 }

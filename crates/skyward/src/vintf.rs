@@ -16,7 +16,7 @@
 use anyhow::{Context, Result};
 use std::ffi::CString;
 use std::fs;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 const VENDOR: &str = "/vendor/etc/vintf";
 const COPY: &str = "/tmp/vintf";
@@ -87,6 +87,45 @@ pub fn prepare() -> Result<()> {
         return Err(std::io::Error::last_os_error()).with_context(|| format!("mount {COPY} over {VENDOR}"));
     }
     Ok(())
+}
+
+/// The phone's passthrough hardware service implementations, under the
+/// names their interface libraries look for. The installed vendor keeps
+/// them with its own suffix, such as `-impl-1.2-qti.so`, while the loader
+/// asks for `-impl.so`; links in a folder on the services' library path
+/// give it the name it asks for.
+pub fn impl_links() -> Result<Option<PathBuf>> {
+    let from = Path::new("/vendor/lib64/hw");
+    if !from.is_dir() {
+        return Ok(None);
+    }
+    let to = Path::new("/tmp/skyward-hw");
+    fs::create_dir_all(to).with_context(|| format!("make {}", to.display()))?;
+    for entry in fs::read_dir(from).with_context(|| format!("read {}", from.display()))? {
+        let entry = entry.with_context(|| format!("read {}", from.display()))?;
+        let name = entry.file_name().to_string_lossy().into_owned();
+        let Some((base, _)) = name.split_once("-impl-") else { continue };
+        if !name.ends_with(".so") {
+            continue;
+        }
+        let link = to.join(format!("{base}-impl.so"));
+        if !link.exists() {
+            std::os::unix::fs::symlink(entry.path(), &link).with_context(|| format!("link {} to {}", link.display(), entry.path().display()))?;
+        }
+        // The boot control's one implementation serves every version of
+        // its interface, and the loader asks for the version the service
+        // registers as.
+        if base.starts_with("android.hardware.boot@") {
+            for version in ["1.1", "1.2"] {
+                let other = to.join(format!("android.hardware.boot@{version}-impl.so"));
+                if !other.exists() {
+                    std::os::unix::fs::symlink(entry.path(), &other)
+                        .with_context(|| format!("link {} to {}", other.display(), entry.path().display()))?;
+                }
+            }
+        }
+    }
+    Ok(Some(to.to_path_buf()))
 }
 
 fn mounted(at: &str) -> bool {

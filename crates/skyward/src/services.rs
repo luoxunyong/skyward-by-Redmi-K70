@@ -38,7 +38,7 @@ const CAPABILITY_VERSION_3: u32 = 0x2008_0522;
 ///
 /// `libraries` is a directory of shared libraries every one of them may
 /// need, searched after whatever it names itself.
-pub fn start(services: &[Service], libraries: Option<&Path>) -> Result<()> {
+pub fn start(services: &[Service], libraries: Option<&Path>, impls: Option<&Path>) -> Result<()> {
     let known = ueventd::accounts(&ueventd::PASSWD_FILES.iter().chain(&ueventd::GROUP_FILES).copied().collect::<Vec<_>>());
     for s in services {
         let mut s = s.clone();
@@ -49,6 +49,9 @@ pub fn start(services: &[Service], libraries: Option<&Path>) -> Result<()> {
             }
         }
         if let Some(dir) = libraries {
+            s.libraries.push(dir.to_string_lossy().into_owned());
+        }
+        if let Some(dir) = impls {
             s.libraries.push(dir.to_string_lossy().into_owned());
         }
         let who = Credentials::of(&s, &known)?;
@@ -223,6 +226,16 @@ fn run(s: &Service, who: &Credentials) -> Result<String> {
 fn command(s: &Service, who: &Credentials) -> Command {
     let mut cmd = Command::new(&s.path);
     cmd.args(&s.args).current_dir("/").stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null());
+    // What a service says before it registers, such as a library its loader
+    // could not open, goes to a file of its own: the screen shows none of
+    // it, and the kernel log keeps only the status it ended with.
+    let name = Path::new(&s.path).file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| "service".into());
+    let log = Path::new("/tmp").join(format!("{name}.log"));
+    if let Ok(file) = std::fs::OpenOptions::new().create(true).append(true).open(&log) {
+        if let Ok(err) = file.try_clone() {
+            cmd.stdout(Stdio::from(file)).stderr(Stdio::from(err));
+        }
+    }
     if !s.libraries.is_empty() {
         cmd.env("LD_LIBRARY_PATH", s.libraries.join(":"));
     }
