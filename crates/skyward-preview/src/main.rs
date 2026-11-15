@@ -394,7 +394,7 @@ fn main() -> Result<()> {
     let adding = |app: &mut App, name: &str, security: Security, field: Field, choosing: bool| {
         app.state.adding = Some(Adding { name: name.into(), security, field, choosing });
     };
-    let pages: [PageShot; 178] = [
+    let pages: [PageShot; 181] = [
         ("11-install-light-locked", Screen::Install, false, &|app| {
             app.state.data = Data::Locked { user: 0, keys: Keys::Digits, checking: false };
         }),
@@ -844,6 +844,43 @@ fn main() -> Result<()> {
         ("198-settings-light-skyward-newer", Screen::Settings, false, &|app| {
             skyward_online(app);
             app.skyward_checked(Ok(skyward_newest()));
+        }),
+        ("199-skyward-update-light-sources", Screen::SkywardUpdate, false, &|app| {
+            skyward_online(app);
+            app.skyward_checked(Ok(skyward_newest()));
+            app.skyward_sources(vec![
+                ("GitHub".into(), "https://github.com/x".into(), Some(42)),
+                ("ghfast".into(), "https://ghfast.top/x".into(), Some(12)),
+                ("ghproxy".into(), "https://ghproxy.net/x".into(), Some(35)),
+                ("gh-proxy".into(), "https://gh-proxy.com/x".into(), Some(80)),
+                ("moeyy".into(), "https://github.moeyy.xyz/x".into(), Some(120)),
+                ("gitmirror".into(), "https://hub.gitmirror.com/x".into(), None),
+                ("llkk".into(), "https://gh.llkk.cc/x".into(), Some(60)),
+            ]);
+            app.state.skyward_source_choice = 1;
+        }),
+        ("200-skyward-mirrors-light", Screen::SkywardSources, false, &|app| {
+            skyward_online(app);
+            app.skyward_checked(Ok(skyward_newest()));
+            app.skyward_sources(vec![
+                ("GitHub".into(), "https://github.com/x".into(), Some(42)),
+                ("ghfast".into(), "https://ghfast.top/x".into(), Some(12)),
+                ("ghproxy".into(), "https://ghproxy.net/x".into(), Some(35)),
+                ("gh-proxy".into(), "https://gh-proxy.com/x".into(), Some(80)),
+                ("moeyy".into(), "https://github.moeyy.xyz/x".into(), Some(120)),
+                ("gitmirror".into(), "https://hub.gitmirror.com/x".into(), None),
+                ("llkk".into(), "https://gh.llkk.cc/x".into(), Some(60)),
+            ]);
+            app.state.skyward_source_choice = 1;
+        }),
+        ("201-settings-light-mirrors", Screen::Settings, false, &|app| {
+            skyward_online(app);
+            app.skyward_checked(Ok(skyward_newest()));
+            app.skyward_sources(vec![
+                ("GitHub".into(), "https://github.com/x".into(), Some(42)),
+                ("ghfast".into(), "https://ghfast.top/x".into(), Some(12)),
+            ]);
+            app.state.skyward_source_choice = 1;
         }),
         ("75-terminal-light-ended", Screen::Terminal, false, &|app| {
             let (rows, cols) = app.term_size(&fonts);

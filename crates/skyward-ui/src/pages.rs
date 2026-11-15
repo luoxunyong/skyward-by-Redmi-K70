@@ -451,7 +451,9 @@ pub fn settings(cx: &Ctx) -> Frame {
 /// fastest source found, or that the sources are being timed.
 fn mirrors_value(cx: &Ctx) -> Option<String> {
     let (s, l) = (cx.state, cx.state.lang);
-    if let Some((name, ms)) = s.skyward_sources.as_ref().and_then(|sources| sources.first()) {
+    if let Some(sources) = s.skyward_sources.as_ref().filter(|sources| !sources.is_empty()) {
+        let choice = s.skyward_source_choice.min(sources.len() - 1);
+        let (name, _, ms) = &sources[choice];
         return Some(match ms {
             Some(ms) => format!("{name} · {ms} ms"),
             None => name.clone(),
@@ -3022,8 +3024,9 @@ pub fn skyward_update(cx: &Ctx) -> Frame {
     let y = widgets::section_first(&mut c, t, f, top, l.pick(["本机", "本機", "This phone"]));
     let y = widgets::info_card(&mut c, t, f, y, &[(l.pick(["当前版本", "目前版本", "Current version"]), VERSION.to_string())]);
     let y = widgets::section(&mut c, t, f, y, l.pick(["在线更新", "線上更新", "Online update"]));
+    let y = skyward_version(&mut c, cx, y, &mut out);
     let y = skyward_source_section(&mut c, cx, y, &mut out);
-    let y = skyward_online(&mut c, cx, y, &mut out);
+    let y = skyward_download(&mut c, cx, y, &mut out);
     let points = [
         l.pick([
             "新版本从 GitHub 下载，校验 SHA-256 后写入 recovery 分区，不会改动系统和用户数据。",
@@ -3037,9 +3040,9 @@ pub fn skyward_update(cx: &Ctx) -> Frame {
         ]),
         l.pick(["更新完成后，重启到恢复模式即可使用新版本。", "更新完成後，重新啟動到復原模式即可使用新版本。", "Once updated, reboot to recovery to use the new version."]),
         l.pick([
-            "下载前会自动测试 GitHub 镜像源的延迟，选择最快的源。",
-            "下載前會自動測試 GitHub 鏡像源的延遲，選擇最快的來源。",
-            "GitHub mirrors are timed before the download, and the fastest is used.",
+            "下载前会自动测试 GitHub 镜像源的延迟，默认选择最快的源；点选列表中的一行可指定下载源。",
+            "下載前會自動測試 GitHub 鏡像源的延遲，預設選擇最快的來源；點選清單中的一行可指定下載來源。",
+            "GitHub mirrors are timed before the download and the fastest is used by default. Tap a row to choose the source.",
         ]),
     ];
     let y = widgets::notes(&mut c, t, f, y + t.m.card_gap, l.pick(NOTES), &points);
@@ -3054,21 +3057,26 @@ fn skyward_source_section(c: &mut Canvas, cx: &Ctx, y: f32, out: &mut Vec<Hit>) 
     let y = widgets::section(c, t, f, y, l.pick(SKYWARD_MIRRORS));
     let took: Vec<String> = sources
         .iter()
-        .map(|(_, ms)| match ms {
+        .map(|(_, _, ms)| match ms {
             Some(ms) => format!("{ms} ms"),
             None => l.pick(["超时", "逾時", "Timed out"]).to_string(),
         })
         .collect();
-    let rows: Vec<Row> = sources
+    let choice = cx.state.skyward_source_choice.min(sources.len().saturating_sub(1));
+    let mut rows: Vec<Row> = sources
         .iter()
         .zip(&took)
         .enumerate()
-        .map(|(i, ((name, _), took))| Row::new(name).subtitle(took).trail(Trail::Check(i == 0)))
+        .map(|(i, ((name, _, _), took))| Row::new(name).subtitle(took).trail(Trail::Check(i == choice)))
         .collect();
+    // The row that times them again sits in the same list, so the card is
+    // one piece rather than two slightly offset ones.
+    rows.push(Row::new(l.pick(["重新测速", "重新測速", "Time again"])).trail(Trail::None));
     let list = widgets::list(c, t, f, y, &rows);
-    let again = widgets::list(c, t, f, list.bottom + t.m.dp(8.0), &[Row::new(l.pick(["重新测速", "重新測速", "Time again"]))]);
-    out.extend(hits(&again.rows, &[Action::CheckSkyward]));
-    again.bottom
+    let picks: Vec<Action> = (0..sources.len()).map(Action::PickSkywardSource).collect();
+    out.extend(hits(&list.rows[..sources.len()], &picks));
+    out.extend(hits(&list.rows[sources.len()..], &[Action::CheckSkyward]));
+    list.bottom
 }
 
 /// The GitHub and mirror sources of Skyward's update, timed: where a new
@@ -3125,12 +3133,10 @@ pub fn skyward_sources(cx: &Ctx) -> Frame {
     Frame::new(t, fit(c, t, y), out, l.pick(SKYWARD_MIRRORS), top)
 }
 
-/// Asking GitHub for Skyward's newest release, then updating to it: its
-/// build for the phone downloaded and written into the recovery partitions,
-/// how far that has come, and how it ended.
-fn skyward_online(c: &mut Canvas, cx: &Ctx, y: f32, out: &mut Vec<Hit>) -> f32 {
+/// Asking GitHub for Skyward's newest release, and what it answered: the
+/// version the page offers, or the check and what it said.
+fn skyward_version(c: &mut Canvas, cx: &Ctx, y: f32, out: &mut Vec<Hit>) -> f32 {
     let (t, f, s, l) = (cx.t, cx.f, cx.state, cx.state.lang);
-    let gap = t.m.card_gap;
     let newest = match &s.skyward_check {
         SkywardCheck::Asking => return widgets::list(c, t, f, y, &[Row::new(l.pick(CHECKING)).trail(Trail::None)]).bottom,
         SkywardCheck::Answered(n) => n,
@@ -3162,7 +3168,17 @@ fn skyward_online(c: &mut Canvas, cx: &Ctx, y: f32, out: &mut Vec<Hit>) -> f32 {
             tr!(l, "最新发布的版本为 {version}", "最新發佈的版本為 {version}", "The newest release is {version}"),
         ),
     };
-    let y = widgets::list(c, t, f, y, &[Row::new(&title).icon(GREEN, Icon::Install).subtitle(&detail).trail(Trail::None)]).bottom;
+    widgets::list(c, t, f, y, &[Row::new(&title).icon(GREEN, Icon::Install).subtitle(&detail).trail(Trail::None)]).bottom
+}
+
+/// Downloading the newest release's build for the phone and writing it into
+/// the recovery partitions, how far that has come, and how it ended; `y`
+/// where there is nothing newer to download.
+fn skyward_download(c: &mut Canvas, cx: &Ctx, y: f32, out: &mut Vec<Hit>) -> f32 {
+    let (t, f, s, l) = (cx.t, cx.f, cx.state, cx.state.lang);
+    let gap = t.m.card_gap;
+    let SkywardCheck::Answered(newest) = &s.skyward_check else { return y };
+    let version = &newest.version;
     if !newest.newer || newest.build.is_none() {
         return y;
     }

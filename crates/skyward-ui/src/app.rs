@@ -1358,6 +1358,8 @@ pub enum Action {
     InstallDownloaded,
     /// Ask GitHub for Skyward's newest release.
     CheckSkyward,
+    /// Use the source at this place in the timed list for the download.
+    PickSkywardSource(usize),
     /// Download the newest release's build for the phone and write it into
     /// the recovery partitions.
     UpdateSkyward,
@@ -2000,7 +2002,9 @@ pub struct State {
     pub download: Option<DownloadJob>,
     pub skyward_check: SkywardCheck,
     /// The GitHub and mirror sources last timed, fastest first.
-    pub skyward_sources: Option<Vec<(String, Option<u64>)>>,
+    pub skyward_sources: Option<Vec<(String, String, Option<u64>)>>,
+    /// Which of those sources the download uses; 0 is the fastest.
+    pub skyward_source_choice: usize,
     /// Updating Skyward, or how that last ended.
     pub skyward_job: Option<SkywardJob>,
     /// How fast data went over the network joined in the last second.
@@ -2100,6 +2104,7 @@ impl Default for State {
             download: None,
             skyward_check: SkywardCheck::Idle,
             skyward_sources: None,
+            skyward_source_choice: 0,
             skyward_job: None,
             traffic: Traffic::default(),
         }
@@ -2397,8 +2402,9 @@ pub enum Effect {
     CheckSkyward,
     /// Download `build` and write it into the recovery partitions, telling
     /// how it goes with [`App::skyward_progress`] and
-    /// [`App::skyward_ended`].
-    UpdateSkyward(Build),
+    /// [`App::skyward_ended`]. The chosen source is tried first, where one
+    /// is chosen.
+    UpdateSkyward { build: Build, preferred: Option<String> },
     StopSkywardUpdate,
     /// Merge the update that waits in the slot the phone runs from,
     /// telling how it goes with [`App::set_update`].
@@ -4090,8 +4096,9 @@ impl App {
     }
 
     /// The GitHub and mirror sources timed for the update, fastest first.
-    pub fn skyward_sources(&mut self, sources: Vec<(String, Option<u64>)>) {
+    pub fn skyward_sources(&mut self, sources: Vec<(String, String, Option<u64>)>) {
         self.state.skyward_sources = Some(sources);
+        self.state.skyward_source_choice = 0;
         if matches!(self.screen(), Screen::SkywardUpdate | Screen::SkywardSources) {
             self.refresh();
         }
@@ -6158,6 +6165,12 @@ impl App {
                     return vec![Effect::CheckSkyward];
                 }
             }
+            Action::PickSkywardSource(i) => {
+                if self.state.skyward_sources.as_ref().is_some_and(|sources| i < sources.len()) {
+                    self.state.skyward_source_choice = i;
+                    self.refresh();
+                }
+            }
             // The build goes into the recovery partitions an install may
             // write too, so one waits for the other.
             Action::UpdateSkyward => {
@@ -6171,9 +6184,15 @@ impl App {
                     return Vec::new();
                 }
                 if !self.state.updating_skyward() {
+                    let preferred = self
+                        .state
+                        .skyward_sources
+                        .as_ref()
+                        .and_then(|sources| sources.get(self.state.skyward_source_choice))
+                        .map(|(_, url, _)| url.clone());
                     self.state.skyward_job = Some(SkywardJob { stage: None, source: None, rate: 0, outcome: None, stopping: false });
                     self.refresh();
-                    return vec![Effect::UpdateSkyward(build)];
+                    return vec![Effect::UpdateSkyward { build, preferred }];
                 }
             }
             // Only the download stops: writing, once begun, goes on to its
@@ -11786,7 +11805,16 @@ mod tests {
         app.state.install = Install::Waiting;
         assert!(tap(&mut app, &f, &i, Action::UpdateSkyward).is_empty(), "an install under way goes first");
         app.state.install = Install::Idle;
-        assert_eq!(tap(&mut app, &f, &i, Action::UpdateSkyward), vec![Effect::UpdateSkyward(build.clone())]);
+        app.skyward_sources(vec![
+            ("GitHub".into(), "https://github.com/x".into(), Some(40)),
+            ("ghfast".into(), "https://ghfast.top/x".into(), Some(12)),
+        ]);
+        assert_eq!(tap(&mut app, &f, &i, Action::PickSkywardSource(1)), Vec::<Effect>::new());
+        assert_eq!(app.state.skyward_source_choice, 1);
+        assert_eq!(
+            tap(&mut app, &f, &i, Action::UpdateSkyward),
+            vec![Effect::UpdateSkyward { build: build.clone(), preferred: Some("https://ghfast.top/x".into()) }]
+        );
         app.skyward_progress(SkywardStage::Download(Progress::Downloading { done: 10_000_000, total: 42_739_608 }), 2_000_000);
         app.key(Key::Back, 0);
         assert_eq!(app.screen(), Screen::SkywardUpdate, "the page stays while the build downloads");
@@ -11794,7 +11822,11 @@ mod tests {
         assert!(!app.frame(&f, &i).hits.iter().any(|h| h.action == Action::StopSkywardUpdate), "stopping, it is not asked again");
         // An end lights the panel, and a touch just after only keeps it lit.
         app.skyward_ended(SkywardEnd::Stopped, 0);
-        assert_eq!(tap_at(&mut app, &f, &i, Action::UpdateSkyward, 2000), vec![Effect::UpdateSkyward(build.clone())], "a download stopped carries on");
+        assert_eq!(
+            tap_at(&mut app, &f, &i, Action::UpdateSkyward, 2000),
+            vec![Effect::UpdateSkyward { build: build.clone(), preferred: Some("https://ghfast.top/x".into()) }],
+            "a download stopped carries on"
+        );
         app.skyward_progress(SkywardStage::Write { done: 1 << 20, total: 4 << 20 }, 0);
         assert!(!app.frame(&f, &i).hits.iter().any(|h| h.action == Action::StopSkywardUpdate), "writing goes on to its end");
         app.key(Key::Back, 2100);
@@ -11811,7 +11843,7 @@ mod tests {
         let mut app = App::new(Screen::Settings, W, H, PPD);
         app.state.wlan = Some(connected("Skyward"));
         app.state.recovery_partitions = true;
-        app.state.skyward_sources = Some(vec![("GitHub".into(), Some(40))]);
+        app.state.skyward_sources = Some(vec![("GitHub".into(), "https://github.com/x".into(), Some(40))]);
         app.refresh();
         assert_eq!(tap(&mut app, &f, &i, Action::Open(Screen::SkywardUpdate)), vec![Effect::CheckSkyward]);
         assert_eq!(app.state.skyward_sources, None, "a fresh check lets the old times go");
@@ -11849,7 +11881,10 @@ mod tests {
     #[test]
     fn a_check_that_is_turned_down_keeps_the_sources_it_timed() {
         let mut app = App::new(Screen::SkywardUpdate, W, H, PPD);
-        let sources = vec![("GitHub".to_string(), Some(40)), ("ghfast".to_string(), Some(12))];
+        let sources = vec![
+            ("GitHub".to_string(), "https://github.com/x".to_string(), Some(40)),
+            ("ghfast".to_string(), "https://ghfast.top/x".to_string(), Some(12)),
+        ];
         app.skyward_sources(sources.clone());
         app.skyward_checked(Err(Unanswered::Failed("GitHub answered 403 Forbidden: API rate limit exceeded".into())));
         assert_eq!(app.state.skyward_sources, Some(sources), "the mirrors are still there to be read");
