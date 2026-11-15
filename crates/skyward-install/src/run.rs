@@ -1290,7 +1290,10 @@ fn run_binary(ctx: &Context, size: u64, served: &impl Fn() -> u64) -> Result<(i3
             Ok(Said::Request(Request::Other(what))) => writeln!(log, "[asked for {what}]").context("write the log")?,
             Ok(Said::Request(moving)) => bar.hear(&moving, started.elapsed()),
             Ok(Said::Unknown(line)) => writeln!(log, "[unknown request] {line}").context("write the log")?,
-            Ok(Said::Output(line)) => writeln!(log, "{line}").context("write the log")?,
+            Ok(Said::Output(line)) => {
+                writeln!(log, "{line}").context("write the log")?;
+                ctx.send(Event::Print(line));
+            }
             Err(RecvTimeoutError::Timeout) => {}
             // Every output has closed: the script, and all it ran, are done.
             Err(RecvTimeoutError::Disconnected) => break,

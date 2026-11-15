@@ -1672,9 +1672,18 @@ pub fn run(cfg: &DeviceConfig, font: &Path, mono: &Path, request: bcb::Request, 
         // What the installer and the eraser told comes first, so a touch
         // acts on the page as it now stands.
         {
+            use skyward_install::{Event as Told, Outcome};
             let told = installer.as_ref().map(Installer::events).unwrap_or_default();
+            let mut printed: Vec<String> = Vec::new();
             for ev in told {
-                use skyward_install::{Event as Told, Outcome};
+                if let Told::Print(line) = &ev {
+                    printed.push(line.clone());
+                    continue;
+                }
+                if !printed.is_empty() {
+                    app.install_output(&printed);
+                    printed.clear();
+                }
                 let finished = matches!(ev, Told::Finished(_));
                 let installed = matches!(ev, Told::Finished(Outcome::Installed { .. } | Outcome::Ran { .. }));
                 let wipe_after = matches!(ev, Told::Finished(Outcome::Installed { wipe: true, .. }));
@@ -1742,6 +1751,9 @@ pub fn run(cfg: &DeviceConfig, font: &Path, mono: &Path, request: bcb::Request, 
                         power(target)?;
                     }
                 }
+            }
+            if !printed.is_empty() {
+                app.install_output(&printed);
             }
         }
         let mut erased = false;
@@ -2591,23 +2603,35 @@ pub fn run(cfg: &DeviceConfig, font: &Path, mono: &Path, request: bcb::Request, 
                     }
                     Effect::StopDownload => downloader.as_ref().context("there is no download to stop")?.stop(),
                     Effect::CheckSkyward => {
-                        ensure!(skyward_checker.is_none(), "GitHub is being asked already");
-                        let probe = cfg.wlan.as_ref().context("the phone's WLAN is not brought up")?.probe.clone();
-                        let task = updates::Task::CheckSkyward { probe, codename: cfg.device.codename.clone() };
-                        skyward_checker = Some(updates::Worker::start(task, servers.clone())?);
+                        // A check asked for while one is under way is left
+                        // to that one: opening the mirrors page or touching
+                        // "time again" must not stop the recovery, and the
+                        // answer already on its way is the one to show.
+                        if skyward_checker.is_none() {
+                            let probe = cfg.wlan.as_ref().context("the phone's WLAN is not brought up")?.probe.clone();
+                            let task = updates::Task::CheckSkyward { probe, codename: cfg.device.codename.clone() };
+                            skyward_checker = Some(updates::Worker::start(task, servers.clone())?);
+                        }
                     }
                     // The zip goes into the recovery's own folder, which is
                     // in memory, before its image goes into the recovery
                     // partitions.
                     Effect::UpdateSkyward { build, preferred } => {
-                        ensure!(skyward_updater.is_none(), "Skyward is being updated already");
-                        ensure!(installer.is_none(), "an installer is running already");
-                        skyward_sys::kmsg(&format!("updating Skyward to {}", build.name))?;
-                        let path = Path::new(skyward_sys::RUN).join(&build.name);
-                        let task = updates::Task::UpdateSkyward { build, codename: cfg.device.codename.clone(), path, preferred };
-                        skyward_updater = Some(updates::Worker::start(task, servers.clone())?);
+                        // An update already under way keeps the recovery
+                        // partitions; a second one is passed over rather
+                        // than stopping the recovery.
+                        if skyward_updater.is_none() && installer.is_none() {
+                            skyward_sys::kmsg(&format!("updating Skyward to {}", build.name))?;
+                            let path = Path::new(skyward_sys::RUN).join(&build.name);
+                            let task = updates::Task::UpdateSkyward { build, codename: cfg.device.codename.clone(), path, preferred };
+                            skyward_updater = Some(updates::Worker::start(task, servers.clone())?);
+                        }
                     }
-                    Effect::StopSkywardUpdate => skyward_updater.as_ref().context("Skyward is not being updated")?.stop(),
+                    Effect::StopSkywardUpdate => {
+                        if let Some(updater) = skyward_updater.as_ref() {
+                            updater.stop();
+                        }
+                    }
                     // Logs that cannot be saved are the page's to report;
                     // the recovery carries on.
                     Effect::ExportLogs { recovery, kernel, storage } => {

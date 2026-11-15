@@ -5518,6 +5518,29 @@ impl App {
         }
     }
 
+    /// Add the lines the install script printed since the page last drew
+    /// them, keeping the last `SCRIPT_LINES`, and bring the page to the
+    /// newest. A batch is drawn once, so a script that prints quickly does
+    /// not wait behind a frame for every line.
+    pub fn install_output(&mut self, lines: &[String]) {
+        if self.state.install == Install::Ending {
+            return;
+        }
+        let shown = &mut self.state.script_output;
+        for line in lines {
+            if shown.len() == SCRIPT_LINES {
+                shown.remove(0);
+            }
+            shown.push(line.clone());
+        }
+        if self.screen() == Screen::Installing {
+            let max = self.max_scroll();
+            let (_, scroll, _) = self.top_mut();
+            *scroll = max;
+            self.refresh();
+        }
+    }
+
     /// What the page shown first asks of the runtime as it shows.
     pub fn arrive(&mut self) -> Vec<Effect> {
         self.arrive_at(self.screen())
@@ -5561,8 +5584,13 @@ impl App {
                 fx
             }
             // The mirrors page times the sources as it opens, whether or
-            // not the release check has an answer already.
-            Screen::SkywardSources if self.state.online() && (matches!(self.state.skyward_check, SkywardCheck::Idle | SkywardCheck::Failed(_)) || self.state.skyward_sources.is_none()) => {
+            // not the release check has an answer already; a check already
+            // under way is left to finish.
+            Screen::SkywardSources
+                if self.state.online()
+                    && !matches!(self.state.skyward_check, SkywardCheck::Asking)
+                    && (matches!(self.state.skyward_check, SkywardCheck::Idle | SkywardCheck::Failed(_)) || self.state.skyward_sources.is_none()) =>
+            {
                 self.state.skyward_check = SkywardCheck::Asking;
                 self.state.skyward_sources = None;
                 vec![Effect::CheckSkyward]
@@ -11866,6 +11894,19 @@ mod tests {
         let update = app.frame(&f, &i).hits.iter().filter(|h| h.action == Action::Open(Screen::SkywardUpdate)).count();
         let mirrors = app.frame(&f, &i).hits.iter().filter(|h| h.action == Action::Open(Screen::SkywardSources)).count();
         assert_eq!((update, mirrors), (1, 1), "Skyward update and GitHub mirrors, each its own page");
+    }
+
+    #[test]
+    fn opening_the_mirrors_page_while_a_check_runs_does_not_ask_again() {
+        let (f, i) = (fonts(), info());
+        let mut app = App::new(Screen::Settings, W, H, PPD);
+        app.state.wlan = Some(connected("Skyward"));
+        app.state.skyward_check = SkywardCheck::Asking;
+        app.state.skyward_sources = None;
+        app.refresh();
+        assert!(tap(&mut app, &f, &i, Action::Open(Screen::SkywardSources)).is_empty());
+        assert_eq!(app.screen(), Screen::SkywardSources);
+        assert_eq!(app.state.skyward_check, SkywardCheck::Asking, "the check under way is left to finish");
     }
 
     #[test]
