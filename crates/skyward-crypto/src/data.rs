@@ -201,7 +201,13 @@ fn show_owner_storage() -> Result<()> {
     if mount::is_mount_point(at)? {
         return Ok(());
     }
-    mount::bind(&Path::new(SHARED_STORAGE).join(OWNER.to_string()), at)
+    let from = Path::new(SHARED_STORAGE).join(OWNER.to_string());
+    // A partition formatted and not yet started by the system has no
+    // shared storage to show yet.
+    if !from.is_dir() {
+        return Ok(());
+    }
+    mount::bind(&from, at)
 }
 
 /// Close what opening the partition opened, where the recovery opened it:
@@ -552,7 +558,12 @@ const TAG_BYTES: usize = 16;
 fn open_user_files(service: &KeyMint, user: u32, credential: Option<&[u8]>, owner: Option<&Token>) -> Result<Note> {
     let Some(protector) = protector(user)? else {
         // No synthetic password: the user set no screen lock, and there is
-        // nothing for a credential to answer or to open behind one.
+        // nothing for a credential to answer or to open behind one. Their
+        // files are open all the same, and the owner's shared storage is
+        // theirs to see.
+        if user == OWNER {
+            show_owner_storage()?;
+        }
         return Ok(Note::default());
     };
     let stretched = match &protector.lock {
