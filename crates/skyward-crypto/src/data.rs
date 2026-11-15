@@ -283,6 +283,13 @@ pub fn open_without_credential(service: &KeyMint) -> Result<Opening> {
             Some(lock) => closed.push(Closed { user, lock: lock.kind, made_up: made_up(user, &protector.id), why: None }),
         }
     }
+    // A partition with no keys at all holds its files as they are, so the
+    // owner's shared storage, where the system has made one, is theirs to
+    // see without a credential. A partition the system has not started has
+    // none, and is left without.
+    if fresh {
+        show_owner_storage()?;
+    }
     Ok(Opening { mounted, closed: open_made_up(service, closed, &owner) })
 }
 
