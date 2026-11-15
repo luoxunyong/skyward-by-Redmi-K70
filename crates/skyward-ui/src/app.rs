@@ -2887,8 +2887,13 @@ fn row_wide(t: &Theme, r: Rect) -> bool {
 /// The whole pixels of the page's `canvas` a held row's `rect` covers:
 /// left, top, width and height.
 fn row_part(r: Rect, canvas: &Canvas) -> (u32, u32, u32, u32) {
-    let (x0, y0) = (r.x.floor().max(0.0) as u32, r.y.floor().max(0.0) as u32);
-    let (x1, y1) = (((r.x + r.w).ceil() as u32).min(canvas.w), ((r.y + r.h).ceil() as u32).min(canvas.h));
+    // The row a finger holds may be from a page that has since grown
+    // shorter, as the update page does when an answer arrives; its top is
+    // cut to the page as well as its foot, so the part never runs backwards.
+    let x0 = r.x.floor().max(0.0).min(canvas.w as f32) as u32;
+    let y0 = r.y.floor().max(0.0).min(canvas.h as f32) as u32;
+    let x1 = (((r.x + r.w).ceil() as u32).min(canvas.w)).max(x0);
+    let y1 = (((r.y + r.h).ceil() as u32).min(canvas.h)).max(y0);
     (x0, y0, x1 - x0, y1 - y0)
 }
 
@@ -4763,7 +4768,7 @@ impl App {
             let cx = Ctx { t: &pressed, f, info, state: &self.state, term: self.term.as_ref(), band: Some(band) };
             let down = pages::render(screen, &cx).canvas;
             assert_eq!((down.w, down.h), (page.w, page.h), "a page held down is laid out as it was");
-            self.row_art = Some((page.crop(x, y, w, h), down.crop(x, y, w, h)));
+            self.row_art = (w > 0 && h > 0).then(|| (page.crop(x, y, w, h), down.crop(x, y, w, h)));
         }
         let view = View {
             scroll,
@@ -7842,6 +7847,15 @@ mod tests {
             snapshot: SnapshotState::None,
             boot: Boot { unlocked: None, verified: None },
         }
+    }
+
+    #[test]
+    fn a_row_pressed_below_a_shorter_page_leaves_no_part() {
+        let canvas = Canvas::new(1440, 100);
+        let (x, y, w, h) = row_part(Rect::new(10.0, 200.0, 100.0, 50.0), &canvas);
+        assert_eq!((x, y, w, h), (10, 100, 100, 0));
+        let (_, _, w, h) = row_part(Rect::new(2000.0, 200.0, 100.0, 50.0), &canvas);
+        assert_eq!((w, h), (0, 0));
     }
 
     #[test]
