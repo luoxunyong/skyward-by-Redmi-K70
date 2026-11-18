@@ -22,7 +22,7 @@ use std::time::{Duration, Instant};
 const RESTART_DELAY: Duration = Duration::from_secs(1);
 
 /// How long a program gets to become what it says it will be.
-const READY_TIMEOUT: Duration = Duration::from_secs(20);
+const READY_TIMEOUT: Duration = Duration::from_secs(5);
 const READY_POLL: Duration = Duration::from_millis(100);
 
 /// Where the kernel says the highest capability it knows.
