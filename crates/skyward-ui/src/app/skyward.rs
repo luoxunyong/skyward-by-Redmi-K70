@@ -101,6 +101,25 @@ mod tests {
     use super::*;
     use crate::app::testing::*;
 
+    #[test]
+    fn selected_mirror_is_passed_to_download_and_invalid_choices_are_ignored() {
+        let (f, i) = (fonts(), info());
+        let mut app = App::new(Screen::SkywardUpdate, W, H, PPD);
+        app.set_wlan(connected("Skyward"));
+        app.state.recovery_partitions = true;
+        app.skyward_checked(Ok(skyward_newest(true)));
+        let build = skyward_newest(true).build.unwrap();
+        let preferred = build.sources(None)[1].clone();
+        assert!(tap(&mut app, &f, &i, Action::Open(Screen::SkywardSources)).is_empty());
+        assert_eq!(app.screen(), Screen::SkywardSources);
+        assert!(tap(&mut app, &f, &i, Action::PickSkywardSource(1)).is_empty());
+        assert_eq!(app.state.skyward_source_choice, 1);
+        assert!(app.act(Action::PickSkywardSource(999), 0).is_empty());
+        assert_eq!(app.state.skyward_source_choice, 1);
+        app.key(Key::Back, 0);
+        assert_eq!(tap(&mut app, &f, &i, Action::UpdateSkyward), vec![Effect::UpdateSkyward { build, preferred: Some(preferred) }]);
+    }
+
     fn skyward_newest(newer: bool) -> Newest {
         Newest {
             version: "0.1.4".into(),
@@ -139,7 +158,7 @@ mod tests {
         app.state.install = Install::Waiting;
         assert!(tap(&mut app, &f, &i, Action::UpdateSkyward).is_empty(), "an install under way goes first");
         app.state.install = Install::Idle;
-        assert_eq!(tap(&mut app, &f, &i, Action::UpdateSkyward), vec![Effect::UpdateSkyward(build.clone())]);
+        assert_eq!(tap(&mut app, &f, &i, Action::UpdateSkyward), vec![Effect::UpdateSkyward { build: build.clone(), preferred: Some(build.link.clone()) }]);
         app.skyward_progress(SkywardStage::Download(Progress::Downloading { done: 10_000_000, total: 42_739_608 }), 2_000_000);
         app.key(Key::Back, 0);
         assert_eq!(app.screen(), Screen::SkywardUpdate, "the page stays while the build downloads");
@@ -147,7 +166,7 @@ mod tests {
         assert!(!app.frame(&f, &i).hits.iter().any(|h| h.action == Action::StopSkywardUpdate), "stopping, it is not asked again");
         // An end lights the panel, and a touch just after only keeps it lit.
         app.skyward_ended(SkywardEnd::Stopped, 0);
-        assert_eq!(tap_at(&mut app, &f, &i, Action::UpdateSkyward, 2000), vec![Effect::UpdateSkyward(build.clone())], "a download stopped carries on");
+        assert_eq!(tap_at(&mut app, &f, &i, Action::UpdateSkyward, 2000), vec![Effect::UpdateSkyward { build: build.clone(), preferred: Some(build.link.clone()) }], "a download stopped carries on");
         app.skyward_progress(SkywardStage::Write { done: 1 << 20, total: 4 << 20 }, 0);
         assert!(!app.frame(&f, &i).hits.iter().any(|h| h.action == Action::StopSkywardUpdate), "writing goes on to its end");
         app.key(Key::Back, 2100);

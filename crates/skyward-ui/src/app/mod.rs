@@ -145,6 +145,7 @@ pub enum Screen {
     /// Skyward's newest release, and updating to it: its build for the
     /// phone downloaded and written into the recovery partitions.
     SkywardUpdate,
+    SkywardSources,
     /// Skyward's own licence.
     License,
     /// The interface typeface and the terms it is used under.
@@ -377,6 +378,7 @@ pub enum Action {
     InstallDownloaded,
     /// Ask GitHub for Skyward's newest release.
     CheckSkyward,
+    PickSkywardSource(usize),
     /// Download the newest release's build for the phone and write it into
     /// the recovery partitions.
     UpdateSkyward,
@@ -584,7 +586,7 @@ pub enum Effect {
     /// Download `build` and write it into the recovery partitions, telling
     /// how it goes with [`App::skyward_progress`] and
     /// [`App::skyward_ended`].
-    UpdateSkyward(Build),
+    UpdateSkyward { build: Build, preferred: Option<String> },
     StopSkywardUpdate,
     /// Merge the update that waits in the slot the phone runs from,
     /// telling how it goes with [`App::set_update`].

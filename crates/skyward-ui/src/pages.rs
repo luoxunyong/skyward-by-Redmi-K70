@@ -94,6 +94,7 @@ pub fn render(screen: Screen, cx: &Ctx) -> Frame {
         Screen::Logs => logs(cx),
         Screen::Update => update(cx),
         Screen::SkywardUpdate => skyward_update(cx),
+        Screen::SkywardSources => skyward_sources(cx),
         Screen::License => license(cx),
         Screen::FontLicense => font_license(cx),
         Screen::Slot => slot(cx),
@@ -2868,6 +2869,9 @@ fn skyward_online(c: &mut Canvas, cx: &Ctx, y: f32, out: &mut Vec<Hit>) -> f32 {
                 Some(SkywardEnd::Updated(_)) => unreachable!("an update that went in shows how it did"),
                 None => {}
             }
+            let mirrors = widgets::list(c, t, f, y + gap, &[Row::new(l.pick(["GitHub 更新源", "GitHub 更新來源", "GitHub download sources"]))]);
+            out.extend(hits(&mirrors.rows, &[Action::Open(Screen::SkywardSources)]));
+            y = mirrors.bottom;
             let mut row = Row::new(l.pick(["下载并更新", "下載並更新", "Download and update"]));
             if !s.online() {
                 row = row.subtitle(l.pick(WLAN_FIRST));
@@ -4096,4 +4100,29 @@ mod tests {
         assert_eq!(capitalized(Lang::En, "empties the data partition"), "Empties the data partition");
         assert_eq!(capitalized(Lang::Hans, "清空 data 分区"), "清空 data 分区");
     }
+}
+
+/// Select a release download source without starting an update.
+fn skyward_sources(cx: &Ctx) -> Frame {
+    let (t, f, s) = (cx.t, cx.f, cx.state);
+    let l = s.lang;
+    let title = l.pick(["GitHub 更新源", "GitHub 更新來源", "GitHub download sources"]);
+    let mut c = Canvas::new(t.m.w, t.m.h * 3);
+    let top = t.m.content_top;
+    let mut y = top;
+    let mut out = Vec::new();
+    if let Some(build) = s.skyward_newest().and_then(|n| n.build.as_ref()) {
+        for (i, url) in build.sources(None).iter().enumerate() {
+            let name = skyward_net::github::source_name(url, &build.link);
+            let label = if i == s.skyward_source_choice { format!("✓ {name}") } else { name };
+            let list = widgets::list(&mut c, t, f, y, &[Row::new(&label).trail(Trail::None)]);
+            if !s.updating_skyward() { out.extend(hits(&list.rows, &[Action::PickSkywardSource(i)])); }
+            y = list.bottom;
+        }
+    } else {
+        let list = widgets::list(&mut c, t, f, y, &[Row::new(l.pick(["先检查更新", "先檢查更新", "Check for updates first"]))]);
+        out.extend(hits(&list.rows, &[Action::CheckSkyward]));
+        y = list.bottom;
+    }
+    Frame::new(t, fit(c, t, y), out, title, top)
 }

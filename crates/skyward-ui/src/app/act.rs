@@ -535,6 +535,12 @@ impl App {
             }
             // The build goes into the recovery partitions an install may
             // write too, so one waits for the other.
+            Action::PickSkywardSource(i) => {
+                if !self.state.updating_skyward() && self.state.skyward_newest().and_then(|n| n.build.as_ref()).is_some_and(|b| i < b.sources(None).len()) {
+                    self.state.skyward_source_choice = i;
+                    self.refresh();
+                }
+            }
             Action::UpdateSkyward => {
                 let build = self.state.skyward_newest().and_then(|n| n.build.clone()).expect("the update is offered for the newest release's build");
                 if !self.state.online() {
@@ -548,7 +554,8 @@ impl App {
                 if !self.state.updating_skyward() {
                     self.state.skyward_job = Some(SkywardJob { stage: None, rate: 0, source: None, outcome: None, stopping: false });
                     self.refresh();
-                    return vec![Effect::UpdateSkyward(build)];
+                    let preferred = build.sources(None).get(self.state.skyward_source_choice).cloned();
+                    return vec![Effect::UpdateSkyward { build, preferred }];
                 }
             }
             // Only the download stops: writing, once begun, goes on to its

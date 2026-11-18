@@ -2278,7 +2278,7 @@ impl Pages<'_> {
                     self.app.download_ended(end, have, now);
                     fetched = true;
                 }
-                updates::Event::Checked(_) | updates::Event::SkywardChecked(_) | updates::Event::Writing { .. } => {
+                updates::Event::Checked(_) | updates::Event::SkywardChecked(_) | updates::Event::SkywardSource(_) | updates::Event::Writing { .. } => {
                     unreachable!("a download asks nothing of its own, and writes nothing")
                 }
             }
@@ -2324,7 +2324,6 @@ impl Pages<'_> {
                     updated = true;
                 }
                 updates::Event::Checked(_) | updates::Event::SkywardChecked(_) => unreachable!("an update asks nothing of its own"),
-                updates::Event::SkywardSource(_) => unreachable!("the source is handled above"),
             }
         }
         if updated {
@@ -2630,12 +2629,12 @@ impl Pages<'_> {
             // The zip goes into the recovery's own folder, which is
             // in memory, before its image goes into the recovery
             // partitions.
-            Effect::UpdateSkyward(build) => {
+            Effect::UpdateSkyward { build, preferred } => {
                 ensure!(self.skyward_updater.is_none(), "Skyward is being updated already");
                 ensure!(self.installer.is_none(), "an installer is running already");
                 skyward_sys::kmsg(&format!("updating Skyward to {}", build.name))?;
                 let path = Path::new(skyward_sys::RUN).join(&build.name);
-                let task = updates::Task::UpdateSkyward { build, codename: cfg.device.codename.clone(), path };
+                let task = updates::Task::UpdateSkyward { build, codename: cfg.device.codename.clone(), path, preferred };
                 self.skyward_updater = Some(updates::Worker::start(task, self.servers.clone())?);
             }
             Effect::StopSkywardUpdate => self.skyward_updater.as_ref().context("Skyward is not being updated")?.stop(),

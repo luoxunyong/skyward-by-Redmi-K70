@@ -177,6 +177,7 @@ pub struct State {
     /// ended.
     pub download: Option<DownloadJob>,
     pub skyward_check: SkywardCheck,
+    pub skyward_source_choice: usize,
     /// Updating Skyward, or how that last ended.
     pub skyward_job: Option<SkywardJob>,
     /// How fast data went over the network joined in the last second.
@@ -264,6 +265,7 @@ impl Default for State {
             have: Have::Nothing,
             download: None,
             skyward_check: SkywardCheck::Idle,
+            skyward_source_choice: 0,
             skyward_job: None,
             traffic: Traffic::default(),
         }

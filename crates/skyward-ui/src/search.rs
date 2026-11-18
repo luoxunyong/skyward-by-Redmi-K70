@@ -28,6 +28,7 @@ const SETTINGS: Text = ["设置", "設定", "Settings"];
 const MOUNT: Text = ["挂载", "掛載", "Mount"];
 
 pub const ENTRIES: &[Entry] = &[
+    entry(["GitHub 更新源", "GitHub 更新來源", "GitHub download sources"], SETTINGS, Screen::SkywardSources, &["github", "jingxiangyuan", "jxy", "gengxinyuan", "gxy", "mirror", "source"]),
     entry(["WLAN", "Wi-Fi", "Wi-Fi"], HOME, Screen::Wlan, &["wuxianwangluo", "wxwl", "wangluo", "wl", "lianwang", "wifi", "wlan"]),
     entry(
         ["双系统", "雙系統", "Dual boot"],
@@ -201,7 +202,7 @@ mod tests {
     #[test]
     fn skyward_is_updated_from_its_own_page() {
         assert_eq!(titles("skyward"), ["Skyward 更新"]);
-        assert_eq!(titles("gengxin"), ["系统更新", "Skyward 更新"]);
+        assert_eq!(titles("gengxin"), ["GitHub 更新源", "系统更新", "Skyward 更新"]);
         assert!(find_on("skyward", Lang::Hans, |s| s != Screen::SkywardUpdate).is_empty());
     }
 
