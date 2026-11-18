@@ -53,6 +53,8 @@ pub enum Event {
     Checked(Result<Option<Release>, Unanswered>),
     /// What GitHub answered of Skyward's newest release.
     SkywardChecked(Result<Newest, Unanswered>),
+    /// The source selected for the Skyward download.
+    SkywardSource(String),
     /// How far the download has come, and how fast it goes, in bytes a
     /// second.
     Progress(Progress, u64),
@@ -168,6 +170,7 @@ impl Worker {
                         }
                     };
                     let sum = Sum::Sha256(build.sha256.clone());
+                    tell(Event::SkywardSource(github::source_name(&build.link, &build.link)));
                     let end = match fetch(&servers, build.sources(located), &sum, &build.name, &path, &stopping, &using, &tell, &mut refused) {
                         // Stopping asked for as the last of it came is
                         // stopping still: nothing is written.

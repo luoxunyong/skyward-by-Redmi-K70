@@ -2308,6 +2308,7 @@ impl Pages<'_> {
         for ev in told {
             match ev {
                 updates::Event::Progress(progress, rate) => self.app.skyward_progress(SkywardStage::Download(progress), rate),
+                updates::Event::SkywardSource(source) => self.app.skyward_source(source),
                 updates::Event::Writing { done, total } => self.app.skyward_progress(SkywardStage::Write { done, total }, 0),
                 updates::Event::Ended(end) => {
                     let end = match end {
@@ -2323,6 +2324,7 @@ impl Pages<'_> {
                     updated = true;
                 }
                 updates::Event::Checked(_) | updates::Event::SkywardChecked(_) => unreachable!("an update asks nothing of its own"),
+                updates::Event::SkywardSource(_) => unreachable!("the source is handled above"),
             }
         }
         if updated {
