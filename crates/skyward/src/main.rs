@@ -771,10 +771,9 @@ fn recovery() -> Result<()> {
         }
         let cfg = DeviceConfig::load(Path::new("/").join(ramdisk::CONFIG))?;
         skyward_sys::kmsg(&format!(
-            "{} {} ({}) recovery up, misc command {:?} args {:?}, asking for {:?}",
+            "{} {} recovery up, misc command {:?} args {:?}, asking for {:?}",
             cfg.device.codename,
             skyward_info::VERSION,
-            skyward_info::BUILD,
             message.command,
             message.args,
             request.work
