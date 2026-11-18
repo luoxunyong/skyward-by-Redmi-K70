@@ -2215,7 +2215,21 @@ const AUTHOR_BELOW_DP: f32 = 19.0;
 
 /// Who made the recovery, a line under the version in its type.
 pub fn author_line(t: &Theme, f: &Fonts, text: &str) -> Sprite {
-    hero_line(t, f, text, t.m.dp(AUTHOR_BELOW_DP))
+    let m = &t.m;
+    let px = m.dp(13.3);
+    let lines: Vec<&str> = text.lines().collect();
+    let widths: Vec<f32> = lines.iter().map(|line| Canvas::new(0, 0).text_width(&f.body, line, px)).collect();
+    let width = widths.iter().copied().fold(0.0, f32::max);
+    let line_height = f.body.cap(px) * 1.35;
+    let height = line_height * lines.len() as f32;
+    let top = m.dp(296.3) + f.body.cap(px) + m.dp(AUTHOR_BELOW_DP) - px * 1.2;
+    Sprite::capture((m.w as f32 - width) / 2.0 - m.dp(2.0), top, (width + m.dp(4.0)).ceil() as u32, height.ceil() as u32, |c, dx, dy| {
+        for (i, line) in lines.iter().enumerate() {
+            let x = (m.w as f32 - widths[i]) / 2.0 + dx;
+            let baseline = f.body.cap(px) + i as f32 * line_height + dy;
+            c.text(&f.body, line, x, baseline, px, Rgba::rgb(0, 0, 0), None);
+        }
+    })
 }
 
 /// A line centred under the About wordmark in the version's type, `below`
