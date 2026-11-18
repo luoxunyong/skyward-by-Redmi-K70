@@ -347,7 +347,7 @@ impl State {
     pub fn offers(&self, screen: Screen) -> bool {
         match screen {
             Screen::Wlan => self.wlan.is_some(),
-            Screen::SkywardUpdate => self.wlan.is_some() && self.recovery_partitions,
+            Screen::SkywardUpdate | Screen::SkywardSources => self.wlan.is_some() && self.recovery_partitions,
             Screen::Systems => self.dual_boot,
             _ => true,
         }

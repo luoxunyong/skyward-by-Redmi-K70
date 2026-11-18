@@ -400,6 +400,10 @@ pub fn settings(cx: &Ctx) -> Frame {
         });
         opens.push(Action::Open(Screen::SkywardUpdate));
     }
+    if s.offers(Screen::SkywardUpdate) {
+        rows.push(Row::new(l.pick(["GitHub 更新源", "GitHub 更新來源", "GitHub download sources"])));
+        opens.push(Action::Open(Screen::SkywardSources));
+    }
     let about = widgets::list(&mut c, t, f, y, &rows);
     out.extend(hits(&about.rows, &opens));
     Frame::new(t, fit(c, t, about.bottom), out, l.pick(SETTINGS), top)
