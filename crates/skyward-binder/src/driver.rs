@@ -11,6 +11,7 @@ use std::convert::Infallible;
 use std::fs::File;
 use std::os::fd::AsRawFd;
 use std::path::Path;
+use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
 
 /// The driver every program on the phone reaches its neighbours through.
@@ -95,6 +96,15 @@ impl Binder {
         Binder::on(node, None)
     }
 
+    /// Open the hardware Binder driver with a callback receiver. HIDL
+    /// biometric services call back on this driver while authentication is
+    /// in progress.
+    pub fn serving_hardware() -> Result<Binder> {
+        let node = HARDWARE.iter().map(Path::new).find(|p| p.exists())
+            .with_context(|| format!("none of {} is here, so no hardware service can be reached", HARDWARE.join(" or ")))?;
+        Binder::on(node, Some(Arc::new(Objects::default())))
+    }
+
     /// An end of the driver that serves `objects` to other programs: an
     /// object written into a call or a reply made through it is one of
     /// these, by its number, and the calls made on them come to the
@@ -135,37 +145,48 @@ impl Binder {
 
     /// Call method `code` on `handle` and wait for what it answers.
     pub fn transact(&self, handle: u32, code: u32, data: &impl Payload) -> Result<Reply<'_>> {
+        self.transact_inner(handle, code, data, None)
+    }
+
+    /// Make a Binder call while also serving protocol-specific callbacks
+    /// delivered during that transaction. The callback receives the
+    /// transaction cookie, method and raw parcel, and returns raw reply
+    /// bytes for the callback protocol.
+    pub fn transact_with(
+        &self,
+        handle: u32,
+        code: u32,
+        data: &impl Payload,
+        mut callback: impl FnMut(u64, u32, &[u8]) -> Result<Vec<u8>>,
+    ) -> Result<Reply<'_>> {
+        self.transact_inner(handle, code, data, Some(&mut callback))
+    }
+
+    fn transact_inner(
+        &self,
+        handle: u32,
+        code: u32,
+        data: &impl Payload,
+        mut callback: Option<&mut dyn FnMut(u64, u32, &[u8]) -> Result<Vec<u8>>>,
+    ) -> Result<Reply<'_>> {
         let payload = data.values();
         let addresses = data.addresses();
         let td = TransactionData {
-            target: handle as u64,
-            code,
-            flags: TF_ACCEPT_FDS,
+            target: handle as u64, code, flags: TF_ACCEPT_FDS,
             data_size: payload.len() as u64,
             offsets_size: (addresses.len() * 8) as u64,
             buffer: payload.as_ptr() as u64,
             offsets: addresses.as_ptr() as u64,
             ..TransactionData::default()
         };
-        // A call that hands over addresses is sent the way that tells the
-        // driver how much room to set aside for what they point at.
-        let mut write = match addresses.is_empty() {
-            true => BC_TRANSACTION.to_ne_bytes().to_vec(),
-            false => BC_TRANSACTION_SG.to_ne_bytes().to_vec(),
-        };
+        let mut write = if addresses.is_empty() { BC_TRANSACTION.to_ne_bytes().to_vec() } else { BC_TRANSACTION_SG.to_ne_bytes().to_vec() };
         write.extend_from_slice(bytes_of(&td));
-        if !addresses.is_empty() {
-            write.extend_from_slice(&data.pointed().to_ne_bytes());
-        }
-        // The driver answers a call with a handful of short notices; what
-        // the other side sent lands in the mapped room, not here. While the
-        // reply is awaited the other side may call back into an object
-        // served here, which is answered and the waiting gone on with.
+        if !addresses.is_empty() { write.extend_from_slice(&data.pointed().to_ne_bytes()); }
         let mut waiting = Waiting { words: write, replies: Vec::new() };
         let mut said = [0u8; SAID_BYTES];
         loop {
             let heard = self.exchange(&mut waiting, &mut said).context("send a call")?;
-            if let Some(reply) = self.take_in(&said[..heard], &mut waiting, true)? {
+            if let Some(reply) = self.take_in_with(&said[..heard], &mut waiting, true, &mut callback)? {
                 // What is still waiting to be told is told now: nothing
                 // asks the driver on this thread again for certain.
                 if !waiting.words.is_empty() {
@@ -189,6 +210,21 @@ impl Binder {
                 bail!("the driver gave a reply to a thread that made no call");
             }
         }
+    }
+
+    pub fn serve_until(&self, done: &AtomicBool, mut callback: impl FnMut(u64, u32, &[u8]) -> Result<Vec<u8>>) -> Result<()> {
+        use std::sync::atomic::Ordering;
+        let mut waiting = Waiting::default();
+        waiting.tell(BC_ENTER_LOOPER, &[]);
+        let mut said = [0u8; SAID_BYTES];
+        while !done.load(Ordering::Acquire) {
+            let heard = self.exchange(&mut waiting, &mut said).context("wait for a call")?;
+            if self.take_in_with(&said[..heard], &mut waiting, false, &mut Some(&mut callback))?.is_some() {
+                bail!("the driver gave a reply to a thread that made no call");
+            }
+        }
+        if !waiting.words.is_empty() { self.exchange(&mut waiting, &mut []).context("answer callback")?; }
+        Ok(())
     }
 
     /// Tell the driver what is waiting to be told and hear what it has to
@@ -252,7 +288,17 @@ impl Binder {
     /// one, what the driver says of a reply that did not arrive is of a
     /// reply this thread gave, to a caller that has gone since: there is
     /// nobody left to tell.
-    fn take_in(&self, mut said: &[u8], waiting: &mut Waiting, calling: bool) -> Result<Option<Reply<'_>>> {
+    fn take_in(&self, said: &[u8], waiting: &mut Waiting, calling: bool) -> Result<Option<Reply<'_>>> {
+        self.take_in_with(said, waiting, calling, &mut None)
+    }
+
+    fn take_in_with(
+        &self,
+        mut said: &[u8],
+        waiting: &mut Waiting,
+        calling: bool,
+        callback: &mut Option<&mut dyn FnMut(u64, u32, &[u8]) -> Result<Vec<u8>>>,
+    ) -> Result<Option<Reply<'_>>> {
         while said.len() >= 4 {
             let note = u32::from_ne_bytes(said[..4].try_into().expect("four bytes"));
             said = &said[4..];
@@ -276,7 +322,22 @@ impl Binder {
                 BR_TRANSACTION => {
                     let raw = part(&mut said, size_of::<TransactionData>())?;
                     let td: TransactionData = unsafe { std::ptr::read_unaligned(raw.as_ptr().cast()) };
-                    self.take_call(&td, waiting);
+                    if let Some(callback) = callback.as_deref_mut() {
+                        let data = match td.data_size {
+                            0 => &[][..],
+                            n => unsafe { std::slice::from_raw_parts(td.buffer as *const u8, n as usize) },
+                        };
+                        let bytes = callback(td.cookie, td.code, data)?;
+                        waiting.tell(BC_FREE_BUFFER, &td.buffer.to_ne_bytes());
+                        if td.flags & TF_ONE_WAY == 0 {
+                            let reply = Parcel::raw(&bytes);
+                            let back = TransactionData { data_size: reply.values().len() as u64, buffer: reply.values().as_ptr() as u64, ..TransactionData::default() };
+                            waiting.tell(BC_REPLY, bytes_of(&back));
+                            waiting.replies.push(reply);
+                        }
+                    } else {
+                        self.take_call(&td, waiting);
+                    }
                 }
                 BR_REPLY => {
                     let raw = part(&mut said, size_of::<TransactionData>())?;
@@ -366,6 +427,15 @@ impl<'a> Handle<'a> {
 
     pub fn transact(&self, code: u32, data: &impl Payload) -> Result<Reply<'a>> {
         self.binder.transact(self.handle, code, data)
+    }
+
+    pub fn transact_with(
+        &self,
+        code: u32,
+        data: &impl Payload,
+        callback: impl FnMut(u64, u32, &[u8]) -> Result<Vec<u8>>,
+    ) -> Result<Reply<'a>> {
+        self.binder.transact_with(self.handle, code, data, callback)
     }
 }
 

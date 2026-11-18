@@ -70,6 +70,11 @@ impl Payload for Parcel {
 }
 
 impl Parcel {
+    /// A payload already encoded by a protocol layered over Binder.
+    pub fn raw(data: &[u8]) -> Parcel {
+        Parcel { data: data.to_vec(), objects: Vec::new() }
+    }
+
     /// A call to `interface`, opened with the header libbinder reads before
     /// it looks at anything the method itself takes.
     pub fn call(interface: &str) -> Parcel {

@@ -15,6 +15,7 @@ mod decrypt;
 mod filework;
 #[cfg(target_os = "android")]
 mod haptics;
+mod fingerprint;
 #[cfg(target_os = "android")]
 mod input;
 #[cfg(target_os = "android")]
