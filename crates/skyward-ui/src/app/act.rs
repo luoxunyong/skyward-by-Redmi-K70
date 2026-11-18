@@ -568,6 +568,7 @@ impl App {
                     return vec![Effect::StopSkywardUpdate];
                 }
             }
+            Action::TestFingerprint => return vec![Effect::TestFingerprint],
             Action::Unavailable(text) => self.say(text, now),
         }
         Vec::new()

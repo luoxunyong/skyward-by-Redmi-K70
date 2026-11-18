@@ -379,6 +379,7 @@ pub enum Action {
     /// Ask GitHub for Skyward's newest release.
     CheckSkyward,
     PickSkywardSource(usize),
+    TestFingerprint,
     /// Download the newest release's build for the phone and write it into
     /// the recovery partitions.
     UpdateSkyward,
@@ -474,6 +475,8 @@ pub enum Effect {
     /// List the folder at this path from the top of a place, to choose a
     /// file to install in, telling what it holds with [`App::set_place`].
     ReadPlace(Place, String),
+    /// Start a fingerprint authentication diagnostic.
+    TestFingerprint,
     /// Open the data partition as far as it opens with nothing a user
     /// knows, telling what waits with [`App::data_waiting`] or why it did
     /// not open with [`App::data_failed`].

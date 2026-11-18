@@ -387,8 +387,11 @@ pub fn settings(cx: &Ctx) -> Frame {
     ]);
     y = widgets::footnote(&mut c, t, f, usb.bottom, note);
     y = widgets::section(&mut c, t, f, y, l.pick(["调试", "偵錯", "Debugging"]));
-    let debug = widgets::list(&mut c, t, f, y, &[Row::new(l.pick(TERMINAL)).icon(SLATE, Icon::Terminal)]);
-    out.extend(hits(&debug.rows, &[Action::Open(Screen::Terminal)]));
+    let debug = widgets::list(&mut c, t, f, y, &[
+        Row::new(l.pick(TERMINAL)).icon(SLATE, Icon::Terminal),
+        Row::new(l.pick(["测试指纹识别", "測試指紋辨識", "Test fingerprint sensor"])).icon(SLATE, Icon::Lock),
+    ]);
+    out.extend(hits(&debug.rows, &[Action::Open(Screen::Terminal), Action::TestFingerprint]));
     y = widgets::section(&mut c, t, f, debug.bottom, l.pick(["关于", "關於", "About"]));
     let mut rows = vec![Row::new(l.pick(ABOUT)).trail(Trail::Value(VERSION))];
     let mut opens = vec![Action::Open(Screen::About)];

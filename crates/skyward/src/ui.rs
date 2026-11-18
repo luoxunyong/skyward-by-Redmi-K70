@@ -1175,6 +1175,7 @@ struct Pages<'a> {
     leave: Target,
     leave_at: Option<u64>,
     installer: Option<Installer>,
+    fingerprint: Option<crate::fingerprint::Worker>,
     /// The install the system asked for, until the data partition it is in
     /// opens, or the user whose own files hold it unlocks them.
     pending: Option<Pending>,
@@ -1407,6 +1408,7 @@ impl<'a> Pages<'a> {
             leave_at: None,
             request,
             installer: None,
+            fingerprint: None,
             pending: None,
             rescue_leaves: None,
             eraser: None,
@@ -1613,6 +1615,7 @@ impl<'a> Pages<'a> {
         self.keep_settings(now)?;
         self.updates_told(now)?;
         self.skyward_told(now)?;
+        self.fingerprint_told(now);
         self.decrypt_told(now)?;
         self.shell_told()?;
         self.take_in(drive_told, now)?;
@@ -1762,6 +1765,7 @@ impl<'a> Pages<'a> {
         let timeout = if ahead { 0 } else { until_due.into_iter().chain(rest_left).min().map_or(1000, |t| t.clamp(floor, 1000)) };
         sleeper.allow(self.may_sleep()?);
         let mut fds = vec![self.inputs.fd(), uevents.fd(), sleeper.fd()];
+        if let Some(f) = &self.fingerprint { fds.push(f.fd()); }
         if let Some(i) = &self.installer {
             fds.push(i.fd());
         }
@@ -2332,6 +2336,13 @@ impl Pages<'_> {
         Ok(())
     }
 
+    fn fingerprint_told(&mut self, now: u64) {
+        if let Some(matched) = self.fingerprint.as_ref().and_then(crate::fingerprint::Worker::ended) {
+            self.fingerprint = None;
+            self.app.report(if matched { "Fingerprint matched." } else { "Fingerprint was not recognized." }, now);
+        }
+    }
+
     /// How opening the data partition, or a user's own files in it, ended.
     fn decrypt_told(&mut self, now: u64) -> Result<()> {
         let Some(ended) = self.decryptor.as_ref().and_then(Decryptor::ended) else { return Ok(()) };
@@ -2620,6 +2631,10 @@ impl Pages<'_> {
             Effect::CheckUpdate => self.check_update()?,
             Effect::Download(release) => self.download(release, now)?,
             Effect::StopDownload => self.downloader.as_ref().context("there is no download to stop")?.stop(),
+            Effect::TestFingerprint => {
+                anyhow::ensure!(self.fingerprint.is_none(), "fingerprint test is already waiting");
+                self.fingerprint = Some(crate::fingerprint::Worker::start()?);
+            }
             Effect::CheckSkyward => {
                 ensure!(self.skyward_checker.is_none(), "GitHub is being asked already");
                 let probe = cfg.wlan.as_ref().context("the phone's WLAN is not brought up")?.probe.clone();
