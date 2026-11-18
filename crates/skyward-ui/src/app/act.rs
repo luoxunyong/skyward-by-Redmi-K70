@@ -546,7 +546,7 @@ impl App {
                     return Vec::new();
                 }
                 if !self.state.updating_skyward() {
-                    self.state.skyward_job = Some(SkywardJob { stage: None, rate: 0, outcome: None, stopping: false });
+                    self.state.skyward_job = Some(SkywardJob { stage: None, rate: 0, source: None, outcome: None, stopping: false });
                     self.refresh();
                     return vec![Effect::UpdateSkyward(build)];
                 }

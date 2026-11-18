@@ -22,6 +22,8 @@ pub struct SkywardJob {
     pub stage: Option<SkywardStage>,
     /// Bytes a second, while it downloads.
     pub rate: u64,
+    /// The mirror selected for the download, with its probe time.
+    pub source: Option<String>,
     pub outcome: Option<SkywardEnd>,
     /// Stopping the download was asked for and is under way.
     pub stopping: bool,
@@ -65,6 +67,15 @@ impl App {
 
     /// How far updating Skyward has come, and how fast the download goes,
     /// in bytes a second.
+    pub fn skyward_source(&mut self, source: String) {
+        if let Some(job) = self.state.skyward_job.as_mut() {
+            job.source = Some(source);
+            if self.screen() == Screen::SkywardUpdate {
+                self.refresh();
+            }
+        }
+    }
+
     pub fn skyward_progress(&mut self, stage: SkywardStage, rate: u64) {
         let job = self.state.skyward_job.as_mut().expect("only an update under way moves on");
         job.stage = Some(stage);
