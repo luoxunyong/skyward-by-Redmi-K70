@@ -234,7 +234,6 @@ pub fn installed_props(slot: Slot) -> Result<HashMap<String, String>> {
         slot,
         skyward_vab::mounted_partitions(slot)?,
         skyward_sys::props(BOOT_PROPS).into_iter().collect(),
-        prop("ro.product.device").as_deref() == Some("vermeer"),
     )
 }
 
@@ -242,7 +241,6 @@ fn load_installed_props(
     slot: Slot,
     mut parts: Vec<skyward_vab::Mounted>,
     mut props: HashMap<String, String>,
-    vermeer: bool,
 ) -> Result<HashMap<String, String>> {
     let base = |m: &skyward_vab::Mounted| -> String {
         m.partition.strip_suffix(slot.suffix()).expect("mounted partitions carry the slot suffix").to_string()
@@ -265,9 +263,9 @@ fn load_installed_props(
                 .with_context(|| format!("read {}", path.display()))?;
         }
     }
-    if vermeer && !parts.iter().any(|m| base(m) == "my_manifest") {
+    if !parts.iter().any(|m| base(m) == "my_manifest") {
         let patch = parts.iter().find(|m| base(m) == "system")
-            .and_then(|system| vermeer_coloros_vendor_patch(&system.mount_point));
+            .and_then(|system| embedded_manifest_vendor_patch(&system.mount_point));
         if let Some(patch) = patch {
             props.insert(VENDOR_PATCH.to_string(), patch);
         }
@@ -277,23 +275,24 @@ fn load_installed_props(
 
 const VENDOR_PATCH: &str = "ro.vendor.build.security_patch";
 
-fn vermeer_coloros_vendor_patch(system: &Path) -> Option<String> {
+fn embedded_manifest_vendor_patch(system: &Path) -> Option<String> {
     let manifest = system.join("my_manifest");
-    if !fs::symlink_metadata(&manifest).ok()?.is_dir() {
+    let path = manifest.join("build.prop");
+    if !fs::symlink_metadata(&manifest).ok()?.is_dir() || !fs::symlink_metadata(&path).ok()?.is_file() {
         return None;
     }
-    let mut vendor = HashMap::new();
-    rsproperties::load_properties_from_file(&manifest.join("build.prop"), Some("ro.vendor.build.*"), "u:r:init:s0", &mut vendor).ok()?;
-    if !vendor.get("ro.vendor.build.fingerprint")?.starts_with("OnePlus/PYB110/") {
-        return None;
-    }
-    let patch = vendor.remove(VENDOR_PATCH)?;
-    patch.parse::<PatchLevel>().ok()?;
     let build = fs::read(system.join("system/build.prop")).ok()?;
     let imported = build.split(|&b| b == b'\n').filter_map(|line| std::str::from_utf8(line).ok()).any(|line| {
         line.split_ascii_whitespace().eq(["import", "/my_manifest/build.prop"])
     });
-    imported.then_some(patch)
+    if !imported {
+        return None;
+    }
+    let mut vendor = HashMap::new();
+    rsproperties::load_properties_from_file(&path, Some(VENDOR_PATCH), "u:r:init:s0", &mut vendor).ok()?;
+    let patch = vendor.remove(VENDOR_PATCH)?;
+    patch.parse::<PatchLevel>().ok()?;
+    Some(patch)
 }
 
 fn read(path: impl AsRef<Path>) -> Result<String> {
@@ -496,7 +495,7 @@ mod tests {
     }
 
     #[test]
-    fn only_the_vermeer_coloros_port_overrides_the_vendor_patch() {
+    fn embedded_coloros_layout_overrides_only_the_vendor_patch() {
         let root = tempfile::tempdir().unwrap();
         let system = root.path().join("system");
         let vendor = root.path().join("vendor");
@@ -505,8 +504,8 @@ mod tests {
         for dir in [system.join("system"), system.join("my_manifest"), vendor.clone()] {
             fs::create_dir_all(dir).unwrap();
         }
-        let write_manifest = |model, patch| {
-            fs::write(&manifest, format!("ro.vendor.build.fingerprint=OnePlus/{model}/port\n{VENDOR_PATCH}={patch}\n")).unwrap();
+        let write_manifest = |fingerprint: &str, patch| {
+            fs::write(&manifest, format!("{fingerprint}{VENDOR_PATCH}={patch}\n")).unwrap();
         };
         let imported = b"\xff\nro.build.version.release=17\nro.build.version.oplusrom=V17\nimport /my_manifest/build.prop\n";
         fs::write(&build, imported).unwrap();
@@ -517,38 +516,42 @@ mod tests {
             mount_point: mount_point.to_path_buf(),
             filesystem: "erofs".into(),
         };
-        let load = |vermeer, separate: Option<&Path>| {
+        let load = |separate: Option<&Path>| {
             let mut parts = vec![part("vendor", &vendor), part("system", &system)];
             parts.extend(separate.map(|path| part("my_manifest", path)));
-            load_installed_props(Slot::A, parts, HashMap::new(), vermeer).unwrap()
+            load_installed_props(Slot::A, parts, HashMap::new()).unwrap()
         };
 
-        write_manifest("PYB110", "2026-11-01");
-        let original = load(false, None);
+        let original = load(None);
         assert_eq!(original[VENDOR_PATCH], "2026-02-01");
         assert_eq!(original["ro.mi.os.version.incremental"], "OS3");
         assert_eq!(original["ro.build.version.oplusrom"], "V17");
         let mut expected = original.clone();
         expected.insert(VENDOR_PATCH.to_string(), "2026-11-01".into());
-        assert_eq!(load(true, None), expected);
+        for fingerprint in [
+            "ro.vendor.build.fingerprint=OnePlus/PYB110/port\n",
+            "ro.vendor.build.fingerprint=OPPO/OtherModel/port\n",
+            "",
+        ] {
+            write_manifest(fingerprint, "2026-11-01");
+            assert_eq!(load(None), expected);
+        }
 
         let separate = root.path().join("standalone-manifest");
         fs::create_dir_all(separate.join("etc")).unwrap();
         fs::write(separate.join("etc/build.prop"), format!("{VENDOR_PATCH}=2026-12-01\n")).unwrap();
-        assert_eq!(load(true, Some(&separate))[VENDOR_PATCH], "2026-12-01");
+        assert_eq!(load(Some(&separate))[VENDOR_PATCH], "2026-12-01");
 
-        write_manifest("OTHER", "2026-11-01");
-        assert_eq!(load(true, None), original);
-        write_manifest("PYB110", "invalid");
-        assert_eq!(load(true, None), original);
-        write_manifest("PYB110", "2026-11-01");
+        write_manifest("", "invalid");
+        assert_eq!(load(None), original);
+        write_manifest("", "2026-11-01");
         fs::write(&build, "ro.build.version.release=17\nro.build.version.oplusrom=V17\n").unwrap();
-        assert_eq!(load(true, None), original);
+        assert_eq!(load(None), original);
 
         fs::write(&build, "ro.build.version.release=16\nro.mi.os.version.incremental=OS3\n").unwrap();
         fs::remove_file(&manifest).unwrap();
-        let stock = load(true, None);
-        assert_eq!(stock, load(false, None));
+        let stock = load(None);
+        assert_eq!(stock["ro.build.version.release"], "16");
         assert_eq!(stock[VENDOR_PATCH], "2026-02-01");
         assert_eq!(stock["ro.mi.os.version.incremental"], "OS3");
         assert_eq!(stock["ro.vendor.build.fingerprint"], "Redmi/vermeer/stock");
